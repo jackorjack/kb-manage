@@ -36,8 +36,8 @@ elif args[:2] == ["agents", "add"]:
     Path(workspace).mkdir(parents=True, exist_ok=True)
     save()
     print(json.dumps({"id": agent_id}))
-elif args[:4] == ["config", "get", "agents.list", "--json"]:
-    print(json.dumps(state["agents"]))
+elif args[:4] == ["config", "get", "agents", "--json"]:
+    print(json.dumps({"defaults": state.get("defaults", {}), "list": state["agents"]}))
 elif args[:2] == ["config", "set"]:
     match = re.search(r"agents\.list\[(\d+)\]\.memorySearch\.extraPaths", args[2])
     if match:

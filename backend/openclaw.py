@@ -102,9 +102,37 @@ class OpenClawService:
             paths = [paths]
         return [path.strip() for path in paths if isinstance(path, str) and path.strip()]
 
+    @staticmethod
+    def _has_extra_paths(item: Dict[str, Any]) -> bool:
+        memory_search = item.get("memorySearch") or item.get("memory_search") or {}
+        return isinstance(memory_search, dict) and (
+            "extraPaths" in memory_search or "extra_paths" in memory_search
+        )
+
+    @staticmethod
+    def _resolve_extra_paths(paths: List[str], workspace: str) -> List[str]:
+        resolved: List[str] = []
+        for raw_path in paths:
+            path = Path(raw_path).expanduser()
+            if not path.is_absolute() and workspace:
+                path = Path(workspace).expanduser() / path
+            value = str(path.resolve()) if path.is_absolute() else raw_path
+            if value not in resolved:
+                resolved.append(value)
+        return resolved
+
+    def _agents_config(self):
+        value = self._json_command(["config", "get", "agents", "--json"])
+        if not isinstance(value, dict):
+            raise OpenClawError("OpenClaw agents configuration has an unexpected format")
+        defaults = value.get("defaults") if isinstance(value.get("defaults"), dict) else {}
+        configured = self._agent_items(value.get("list", []))
+        return defaults, configured
+
     def list_agents(self) -> List[Dict[str, Any]]:
         listed = self._agent_items(self._json_command(["agents", "list", "--json"]))
-        configured = self._agent_items(self._json_command(["config", "get", "agents.list", "--json"]))
+        defaults, configured = self._agents_config()
+        listed_by_id = {self._agent_id(item): item for item in listed if self._agent_id(item)}
         configured_by_id = {
             self._agent_id(item): item for item in configured if self._agent_id(item)
         }
@@ -116,35 +144,53 @@ class OpenClawService:
                 continue
             seen.add(agent_id)
             config = configured_by_id.get(agent_id, {})
+            listed_item = listed_by_id.get(agent_id, {})
+            workspace = str(
+                listed_item.get("workspace")
+                or listed_item.get("agentDir")
+                or config.get("workspace")
+                or config.get("agentDir")
+                or defaults.get("workspace")
+                or ""
+            )
+            own_config = config if config else listed_item
+            if self._has_extra_paths(own_config):
+                raw_paths = self._extra_paths(own_config)
+                path_source = "agent"
+            else:
+                raw_paths = self._extra_paths(defaults)
+                path_source = "default" if raw_paths else ""
             result.append(
                 {
                     "id": agent_id,
                     "name": str(item.get("name") or config.get("name") or agent_id),
-                    "workspace": str(
-                        item.get("workspace")
-                        or item.get("agentDir")
-                        or config.get("workspace")
-                        or config.get("agentDir")
-                        or ""
-                    ),
-                    "extra_paths": self._extra_paths(config) or self._extra_paths(item),
+                    "workspace": workspace,
+                    "extra_paths": self._resolve_extra_paths(raw_paths, workspace),
+                    "path_source": path_source,
                 }
             )
         return result
 
     def _configured_agent(self, agent_id: str):
-        agent_list = self._agent_items(self._json_command(["config", "get", "agents.list", "--json"]))
+        defaults, agent_list = self._agents_config()
         index = next(
             (i for i, item in enumerate(agent_list) if self._agent_id(item) == agent_id),
             None,
         )
         if index is None:
             raise OpenClawError(f"OpenClaw agent not found: {agent_id}")
-        return index, agent_list[index]
+        return index, agent_list[index], defaults
 
     def configure_agent(self, agent_id: str, documents_path: Path) -> Dict[str, str]:
-        index, agent = self._configured_agent(agent_id)
-        configured_paths = self._extra_paths(agent)
+        index, agent, defaults = self._configured_agent(agent_id)
+        workspace = str(
+            agent.get("workspace")
+            or agent.get("agentDir")
+            or defaults.get("workspace")
+            or ""
+        )
+        source = agent if self._has_extra_paths(agent) else defaults
+        configured_paths = self._resolve_extra_paths(self._extra_paths(source), workspace)
         path = str(documents_path)
         if path not in configured_paths:
             self.run(
@@ -158,7 +204,7 @@ class OpenClawService:
             )
         return {
             "agent_id": agent_id,
-            "workspace": str(agent.get("workspace") or agent.get("agentDir") or ""),
+            "workspace": workspace,
             "path": str(documents_path),
         }
 

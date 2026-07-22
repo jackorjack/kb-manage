@@ -313,6 +313,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "name": agent["name"],
                     "workspace": agent["workspace"],
                     "extraPaths": agent["extra_paths"],
+                    "pathSource": agent["path_source"],
                     "used": agent["id"] in used_agent_ids,
                 }
                 for agent in agents

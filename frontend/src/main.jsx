@@ -139,14 +139,35 @@ function Login({ onLogin }) {
   );
 }
 
-function Modal({ title, children, onClose }) {
+function Modal({ title, children, onClose, eyebrow = "ACTION", className = "", closeDisabled = false }) {
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="modal-panel" role="dialog" aria-modal="true" aria-label={title}>
-        <div className="modal-header"><div><p className="eyebrow">ACTION</p><h2>{title}</h2></div><button className="icon-button" title="关闭" onClick={onClose}><X size={18} /></button></div>
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !closeDisabled && onClose()}>
+      <section className={`modal-panel ${className}`} role="dialog" aria-modal="true" aria-label={title}>
+        <div className="modal-header"><div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2></div><button className="icon-button" title="关闭" disabled={closeDisabled} onClick={onClose}><X size={18} /></button></div>
         {children}
       </section>
     </div>
+  );
+}
+
+function ConfirmDialog({ title, subject, description, note, confirmLabel, busy, error, onClose, onConfirm }) {
+  return (
+    <Modal title={title} eyebrow="DESTRUCTIVE ACTION" className="confirm-modal" closeDisabled={busy} onClose={onClose}>
+      <div className="confirm-target">
+        <div className="confirm-icon"><Trash2 size={20} /></div>
+        <div><span>操作对象</span><strong>{subject}</strong></div>
+      </div>
+      <p className="confirm-description">{description}</p>
+      <div className="confirm-note"><AlertTriangle size={16} /><span>{note}</span></div>
+      <ErrorNotice message={error} />
+      <div className="modal-actions">
+        <button type="button" className="ghost-button" disabled={busy} onClick={onClose}>取消</button>
+        <button type="button" className="danger-button" disabled={busy} onClick={onConfirm}>
+          {busy ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
+          {busy ? "正在删除" : confirmLabel}
+        </button>
+      </div>
+    </Modal>
   );
 }
 
@@ -226,7 +247,7 @@ function CreateKbModal({ onClose, onCreated }) {
             <input value={path} readOnly={configuredPaths.length === 1} onChange={(event) => setPath(event.target.value)} placeholder="/srv/openclaw/knowledge/products" />
           )}
         </label>
-        <p className="field-hint">已有 Agent 只有一个记忆目录时会自动使用；没有目录时请填写服务器上的绝对路径。管理后台不会自动创建 Agent。</p>
+        <p className="field-hint">{selectedAgent?.pathSource === "default" ? "该 Agent 未单独配置记忆目录，当前使用 OpenClaw 全局默认目录。" : "已有 Agent 只有一个记忆目录时会自动使用；没有目录时请填写服务器上的绝对路径。"} 管理后台不会自动创建 Agent。</p>
         {!agentsLoading && !availableAgents.length && <p className="field-hint">没有可关联的 Agent，请先在 OpenClaw 中创建未关联的 Agent。</p>}
         <ErrorNotice message={error} />
         <div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy || agentsLoading || !agentId || selectedAgent?.used}>{busy ? <LoaderCircle className="spin" size={16} /> : <Plus size={16} />}{busy ? "正在配置" : "创建知识库"}</button></div>
@@ -335,6 +356,10 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob
   const [documents, setDocuments] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const completedJobId = ["succeeded", "failed"].includes(kb.latestJob?.status) ? kb.latestJob.id : "";
 
   async function loadDocuments() {
     setLoading(true);
@@ -349,19 +374,98 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob
     }
   }
 
-  useEffect(() => { loadDocuments(); }, [kb.id]);
+  useEffect(() => { loadDocuments(); }, [kb.id, completedJobId]);
+  useEffect(() => {
+    setDeleteTarget(null);
+    setDeleteError("");
+  }, [kb.id]);
 
-  async function remove(document) {
-    if (!window.confirm(`确认删除「${document.name}」？目录中的 Markdown 文件也会被删除。`)) return;
+  async function refreshAll() {
+    await onRefresh();
+    await loadDocuments();
+  }
+
+  async function remove() {
+    if (!deleteTarget) return;
+    setDeleteBusy(true);
+    setDeleteError("");
     try {
-      const result = await api(`/api/knowledge-bases/${kb.id}/documents/${document.id}`, { method: "DELETE" });
+      const result = await api(`/api/knowledge-bases/${kb.id}/documents/${deleteTarget.id}`, { method: "DELETE" });
+      setDeleteTarget(null);
       onShowJob(result);
     } catch (err) {
-      setError(err.message);
+      setDeleteError(err.message);
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
-  return <main className="workspace"><header className="workspace-header"><div><p className="eyebrow">KNOWLEDGE BASE / {kb.slug}</p><h1>{kb.name}</h1><div className="path-line"><FolderOpen size={14} />{kb.path}<span className="separator">·</span>{kb.agentId}</div></div><div className="header-actions"><button className="ghost-button" disabled={busy} onClick={onRefresh}><RefreshCw size={16} className={busy ? "spin" : ""} />刷新</button><button className="primary-button" disabled={busy} onClick={onUpload}><Upload size={16} />导入文档</button><button className="icon-button danger-icon" disabled={busy} title="删除知识库" onClick={() => onDelete(kb)}><Trash2 size={17} /></button></div></header><ErrorNotice message={error} onClose={() => setError("")} />{busy && <div className="busy-banner"><LoaderCircle size={16} className="spin" /><span>后台任务正在运行，文件操作暂时锁定</span><button onClick={() => onShowJob(kb.activeJob || kb.latestJob)}>查看任务 <ChevronRight size={14} /></button></div>}<section className="metric-row"><div className="metric"><span>文档数量</span><strong>{documents.length.toString().padStart(2, "0")}</strong><small>Markdown files</small></div><div className="metric"><span>当前状态</span><strong className="metric-status"><StatusPill status={kb.latestJob?.status} phase={kb.latestJob?.phase} /></strong><small>{kb.latestJob ? formatTime(kb.latestJob.finishedAt || kb.latestJob.createdAt) : "尚未执行索引"}</small></div><div className="metric"><span>存储目录</span><strong><HardDrive size={20} /></strong><small>external directory</small></div><div className="metric accent"><span>检索 agent</span><strong>{kb.agentId.replace("kb-", "")}</strong><small>isolated memory scope</small></div></section><section className="documents-section"><div className="section-heading"><div><p className="eyebrow">DOCUMENT REGISTER</p><h2>文件目录 <span>{documents.length}</span></h2></div><div className="section-tools"><button className="icon-button" title="刷新文件列表" onClick={loadDocuments}><RefreshCw size={16} /></button><button className="force-button" disabled={busy} onClick={() => onIndex(true)}><Zap size={15} />强制同步</button></div></div><div className="table-wrap"><table><thead><tr><th>文件名称</th><th>类型</th><th>大小</th><th>更新时间</th><th className="action-col">操作</th></tr></thead><tbody>{loading ? <tr><td colSpan="5" className="table-empty"><LoaderCircle className="spin" size={18} />正在读取目录</td></tr> : documents.length === 0 ? <tr><td colSpan="5" className="table-empty"><FileText size={22} /><span>目录中还没有 Markdown 文档</span><button className="text-button" disabled={busy} onClick={onUpload}>导入第一批文档</button></td></tr> : documents.map((document) => <tr key={document.id}><td><div className="file-name"><div className="file-icon"><FileText size={16} /></div><span>{document.name}</span></div></td><td><span className="file-type">{document.sourceExt === ".docx" ? "DOCX → MD" : "MARKDOWN"}</span></td><td>{formatBytes(document.sizeBytes)}</td><td>{formatTime(document.modifiedAt)}</td><td className="action-col"><button className="icon-button danger-icon" disabled={busy} title="删除文件" onClick={() => remove(document)}><Trash2 size={16} /></button></td></tr>)}</tbody></table></div></section></main>;
+  return (
+    <>
+      <main className="workspace">
+        <header className="workspace-header">
+          <div>
+            <p className="eyebrow">KNOWLEDGE BASE / {kb.slug}</p>
+            <h1>{kb.name}</h1>
+            <div className="path-line"><FolderOpen size={14} />{kb.path}<span className="separator">·</span>{kb.agentId}</div>
+          </div>
+          <div className="header-actions">
+            <button className="ghost-button task-button" disabled={!kb.latestJob} onClick={() => onShowJob(kb.activeJob || kb.latestJob)}><Clock3 size={16} />最近任务</button>
+            <button className="ghost-button refresh-button" disabled={busy} onClick={refreshAll}><RefreshCw size={16} className={busy ? "spin" : ""} />刷新</button>
+            <button className="primary-button" disabled={busy} onClick={onUpload}><Upload size={16} />导入文档</button>
+            <button className="icon-button danger-icon" disabled={busy} title="删除知识库" onClick={() => onDelete(kb)}><Trash2 size={17} /></button>
+          </div>
+        </header>
+        <ErrorNotice message={error} onClose={() => setError("")} />
+        {busy && <div className="busy-banner"><LoaderCircle size={16} className="spin" /><span>后台任务正在运行，文件操作暂时锁定</span><button onClick={() => onShowJob(kb.activeJob || kb.latestJob)}>查看任务 <ChevronRight size={14} /></button></div>}
+        <section className="metric-row">
+          <div className="metric"><span>文档数量</span><strong>{documents.length.toString().padStart(2, "0")}</strong><small>Markdown files</small></div>
+          <div className="metric"><span>当前状态</span><strong className="metric-status"><StatusPill status={kb.latestJob?.status} phase={kb.latestJob?.phase} /></strong><small>{kb.latestJob ? formatTime(kb.latestJob.finishedAt || kb.latestJob.createdAt) : "尚未执行索引"}</small></div>
+          <div className="metric"><span>存储目录</span><strong><HardDrive size={20} /></strong><small>external directory</small></div>
+          <div className="metric accent"><span>检索 agent</span><strong>{kb.agentId.replace("kb-", "")}</strong><small>isolated memory scope</small></div>
+        </section>
+        <section className="documents-section">
+          <div className="section-heading">
+            <div><p className="eyebrow">DOCUMENT REGISTER</p><h2>文件目录 <span>{documents.length}</span></h2></div>
+            <div className="section-tools"><button className="icon-button" title="刷新文件列表" onClick={loadDocuments}><RefreshCw size={16} /></button><button className="force-button" disabled={busy} onClick={() => onIndex(true)}><Zap size={15} />强制同步</button></div>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>文件名称</th><th>类型</th><th>大小</th><th>更新时间</th><th className="action-col">操作</th></tr></thead>
+              <tbody>
+                {loading ? (
+                  <tr><td colSpan="5" className="table-empty"><LoaderCircle className="spin" size={18} />正在读取目录</td></tr>
+                ) : documents.length === 0 ? (
+                  <tr><td colSpan="5" className="table-empty"><FileText size={22} /><span>目录中还没有 Markdown 文档</span><button className="text-button" disabled={busy} onClick={onUpload}>导入第一批文档</button></td></tr>
+                ) : documents.map((document) => (
+                  <tr key={document.id}>
+                    <td><div className="file-name"><div className="file-icon"><FileText size={16} /></div><span>{document.name}</span></div></td>
+                    <td><span className="file-type">{document.sourceExt === ".docx" ? "DOCX → MD" : "MARKDOWN"}</span></td>
+                    <td>{formatBytes(document.sizeBytes)}</td>
+                    <td>{formatTime(document.modifiedAt)}</td>
+                    <td className="action-col"><button className="icon-button danger-icon" disabled={busy} title="删除文件" onClick={() => { setDeleteTarget(document); setDeleteError(""); }}><Trash2 size={16} /></button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+      {deleteTarget && (
+        <ConfirmDialog
+          title="删除文件？"
+          subject={deleteTarget.name}
+          description="目录中的 Markdown 文件将被永久删除，随后自动执行增量索引。"
+          note="此操作无法从管理后台撤销。"
+          confirmLabel="删除并同步"
+          busy={deleteBusy}
+          error={deleteError}
+          onClose={() => { setDeleteTarget(null); setDeleteError(""); }}
+          onConfirm={remove}
+        />
+      )}
+    </>
+  );
 }
 
 function App() {
@@ -374,6 +478,9 @@ function App() {
   const [showSystem, setShowSystem] = useState(false);
   const [job, setJob] = useState(null);
   const [error, setError] = useState("");
+  const [deleteKbTarget, setDeleteKbTarget] = useState(null);
+  const [deleteKbBusy, setDeleteKbBusy] = useState(false);
+  const [deleteKbError, setDeleteKbError] = useState("");
 
   async function loadMe() {
     try {
@@ -406,6 +513,26 @@ function App() {
     const timer = setInterval(() => loadKbs(), 1500);
     return () => clearInterval(timer);
   }, [user, selected?.id]);
+  useEffect(() => {
+    if (!job || ["succeeded", "failed"].includes(job.status)) return undefined;
+    let active = true;
+    const refreshJob = async () => {
+      try {
+        const result = await api(`/api/jobs/${job.id}`);
+        if (!active) return;
+        setJob(result);
+        if (["succeeded", "failed"].includes(result.status)) loadKbs(result.knowledgeBaseId);
+      } catch (err) {
+        if (active) setError(err.message);
+      }
+    };
+    const timer = setInterval(refreshJob, 1000);
+    refreshJob();
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [job?.id, job?.status]);
 
   const busy = Boolean(items.some((item) => item.isBusy));
   const current = useMemo(() => items.find((item) => item.id === selected?.id) || selected, [items, selected]);
@@ -426,23 +553,65 @@ function App() {
     loadKbs(current?.id);
   }
 
-  async function removeKnowledgeBase(kb) {
-    if (!window.confirm(`确认删除知识库「${kb.name}」？只会删除管理记录，不会删除映射目录和其中的文件。`)) return;
+  async function removeKnowledgeBase() {
+    if (!deleteKbTarget) return;
+    setDeleteKbBusy(true);
+    setDeleteKbError("");
     try {
-      await api(`/api/knowledge-bases/${kb.id}`, { method: "DELETE" });
-      setItems((currentItems) => currentItems.filter((item) => item.id !== kb.id));
-      setSelected((currentSelected) => currentSelected?.id === kb.id ? null : currentSelected);
+      await api(`/api/knowledge-bases/${deleteKbTarget.id}`, { method: "DELETE" });
+      setItems((currentItems) => currentItems.filter((item) => item.id !== deleteKbTarget.id));
+      setSelected((currentSelected) => currentSelected?.id === deleteKbTarget.id ? null : currentSelected);
       setJob(null);
+      setDeleteKbTarget(null);
       setError("");
     } catch (err) {
-      setError(err.message);
+      setDeleteKbError(err.message);
+    } finally {
+      setDeleteKbBusy(false);
     }
   }
 
   if (authLoading) return <div className="loading-screen"><LoaderCircle className="spin" size={22} />正在连接管理后台</div>;
   if (!user) return <Login onLogin={(nextUser) => { setUser(nextUser); }} />;
 
-  return <div className="app-shell"><Sidebar items={items} selected={current} onSelect={(item) => { setSelected(item); setShowSystem(false); }} onCreate={() => setShowCreate(true)} onLogout={logout} systemOpen={showSystem} onSystem={() => setShowSystem((value) => !value)} /><div className="main-stage"><div className="topline"><span><Activity size={14} /> CONTROL ROOM / LOCAL</span><span>{new Date().toLocaleDateString("zh-CN", { weekday: "long", month: "long", day: "numeric" })}</span></div>{error && <div className="stage-error"><ErrorNotice message={error} onClose={() => setError("")} /></div>}{showSystem ? <SystemPanel onClose={() => setShowSystem(false)} /> : current ? <Workspace kb={current} busy={busy} onRefresh={() => loadKbs(current.id)} onUpload={() => setShowUpload(true)} onDelete={removeKnowledgeBase} onIndex={(force) => api(`/api/knowledge-bases/${current.id}/index`, { method: "POST", body: JSON.stringify({ force }) }).then(newJob).catch((err) => setError(err.message))} onShowJob={setJob} /> : <EmptyState onCreate={() => setShowCreate(true)} />}</div>{job && <JobPanel job={job} onClose={() => setJob(null)} />}{showCreate && <CreateKbModal onClose={() => setShowCreate(false)} onCreated={created} />}{showUpload && current && <UploadModal kb={current} onClose={() => setShowUpload(false)} onUploaded={newJob} />}</div>;
+  return (
+    <div className="app-shell">
+      <Sidebar items={items} selected={current} onSelect={(item) => { setSelected(item); setShowSystem(false); }} onCreate={() => setShowCreate(true)} onLogout={logout} systemOpen={showSystem} onSystem={() => setShowSystem((value) => !value)} />
+      <div className="main-stage">
+        <div className="topline"><span><Activity size={14} /> CONTROL ROOM / LOCAL</span><span>{new Date().toLocaleDateString("zh-CN", { weekday: "long", month: "long", day: "numeric" })}</span></div>
+        {error && <div className="stage-error"><ErrorNotice message={error} onClose={() => setError("")} /></div>}
+        {showSystem ? (
+          <SystemPanel onClose={() => setShowSystem(false)} />
+        ) : current ? (
+          <Workspace
+            kb={current}
+            busy={busy}
+            onRefresh={() => loadKbs(current.id)}
+            onUpload={() => setShowUpload(true)}
+            onDelete={(kb) => { setDeleteKbTarget(kb); setDeleteKbError(""); }}
+            onIndex={(force) => api(`/api/knowledge-bases/${current.id}/index`, { method: "POST", body: JSON.stringify({ force }) }).then(newJob).catch((err) => setError(err.message))}
+            onShowJob={setJob}
+          />
+        ) : <EmptyState onCreate={() => setShowCreate(true)} />}
+      </div>
+      {job && <JobPanel job={job} onClose={() => setJob(null)} />}
+      {showCreate && <CreateKbModal onClose={() => setShowCreate(false)} onCreated={created} />}
+      {showUpload && current && <UploadModal kb={current} onClose={() => setShowUpload(false)} onUploaded={newJob} />}
+      {deleteKbTarget && (
+        <ConfirmDialog
+          title="删除知识库？"
+          subject={deleteKbTarget.name}
+          description="此知识库的管理记录、文档清单和任务记录将被移除。"
+          note={`服务器目录 ${deleteKbTarget.path} 及其中的文件会保留。`}
+          confirmLabel="删除知识库"
+          busy={deleteKbBusy}
+          error={deleteKbError}
+          onClose={() => { setDeleteKbTarget(null); setDeleteKbError(""); }}
+          onConfirm={removeKnowledgeBase}
+        />
+      )}
+    </div>
+  );
 }
 
 createRoot(document.getElementById("root")).render(<App />);

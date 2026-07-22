@@ -32,6 +32,7 @@ def make_client(tmp_path, monkeypatch):
     state_path.write_text(
         json.dumps(
             {
+                "defaults": {},
                 "agents": [
                     {
                         "id": "assistant",
@@ -157,6 +158,7 @@ def test_existing_agent_path_can_be_inferred_without_creating_agent(tmp_path, mo
         agents = client.get("/api/openclaw/agents")
         assert agents.status_code == 200
         assert agents.json()["items"][0]["extraPaths"] == [str(inferred_path)]
+        assert agents.json()["items"][0]["pathSource"] == "agent"
 
         created = client.post(
             "/api/knowledge-bases",
@@ -168,6 +170,37 @@ def test_existing_agent_path_can_be_inferred_without_creating_agent(tmp_path, mo
 
     state = json.loads(state_path.read_text())
     assert not any(command[:2] == ["agents", "add"] for command in state["commands"])
+
+
+def test_agent_inherits_global_default_memory_directory(tmp_path, monkeypatch):
+    client, state_path = make_client(tmp_path, monkeypatch)
+    state = json.loads(state_path.read_text())
+    workspace = Path(state["agents"][0]["workspace"])
+    workspace.mkdir()
+    inherited_path = workspace / "global-docs"
+    state["defaults"] = {
+        "memorySearch": {"extraPaths": ["global-docs"]},
+    }
+    state_path.write_text(json.dumps(state))
+
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        agents = client.get("/api/openclaw/agents")
+        assert agents.status_code == 200
+        assert agents.json()["items"][0]["extraPaths"] == [str(inherited_path)]
+        assert agents.json()["items"][0]["pathSource"] == "default"
+
+        created = client.post(
+            "/api/knowledge-bases",
+            json={"name": "全局目录", "agentId": "assistant"},
+            headers=headers,
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["path"] == str(inherited_path)
+
+    state = json.loads(state_path.read_text())
+    assert not any(command[:2] == ["config", "set"] for command in state["commands"])
 
 
 def test_unknown_agent_is_rejected_without_auto_creation(tmp_path, monkeypatch):
