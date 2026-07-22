@@ -13,6 +13,7 @@ OPENCLAW_BIN="${OPENCLAW_BIN:-}"
 PORT="${PORT:-}"
 RUN_USER="${RUN_USER:-${SUDO_USER:-$(id -un)}}"
 INSTALL_SERVICE=0
+RESTART_SERVICE=0
 
 usage() {
   cat <<'EOF'
@@ -31,6 +32,7 @@ usage() {
   --service-name NAME   systemd 服务名，默认是 openclaw-kb-manager
   --run-user NAME       systemd 服务运行用户，默认是当前用户
   --install-service     写入 systemd 并启动服务，需要 sudo 权限
+  --restart             读取最新 .env，刷新并重启已安装的 systemd 服务
   -h, --help            显示帮助
 
 说明:
@@ -81,6 +83,46 @@ sed_escape() {
   printf '%s' "$1" | sed 's/[\\&|]/\\&/g'
 }
 
+install_service_unit() {
+  require_command systemctl
+  if [[ "$(id -u)" -eq 0 ]]; then
+    SUDO=()
+  else
+    require_command sudo
+    SUDO=(sudo)
+  fi
+
+  id "$RUN_USER" >/dev/null 2>&1 || fail "systemd 运行用户不存在: $RUN_USER"
+  RUN_GROUP="$(id -gn "$RUN_USER")"
+  SYSTEM_PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+  SERVICE_TEMPLATE="$APP_DIR/scripts/openclaw-kb-manager.service.template"
+  [[ -f "$SERVICE_TEMPLATE" ]] || fail "找不到 systemd 模板: $SERVICE_TEMPLATE"
+
+  APP_DIR_ESCAPED="$(sed_escape "$APP_DIR")"
+  ENV_FILE_ESCAPED="$(sed_escape "$ENV_FILE")"
+  RUN_USER_ESCAPED="$(sed_escape "$RUN_USER")"
+  RUN_GROUP_ESCAPED="$(sed_escape "$RUN_GROUP")"
+  PORT_ESCAPED="$(sed_escape "$PORT")"
+  OPENCLAW_DIR_ESCAPED="$(sed_escape "$OPENCLAW_DIR")"
+  SYSTEM_PATH_ESCAPED="$(sed_escape "$SYSTEM_PATH")"
+
+  info "写入 systemd 服务: ${SERVICE_NAME}.service"
+  sed \
+    -e "s|@APP_DIR@|$APP_DIR_ESCAPED|g" \
+    -e "s|@ENV_FILE@|$ENV_FILE_ESCAPED|g" \
+    -e "s|@RUN_USER@|$RUN_USER_ESCAPED|g" \
+    -e "s|@RUN_GROUP@|$RUN_GROUP_ESCAPED|g" \
+    -e "s|@PORT@|$PORT_ESCAPED|g" \
+    -e "s|@OPENCLAW_DIR@|$OPENCLAW_DIR_ESCAPED|g" \
+    -e "s|@SYSTEM_PATH@|$SYSTEM_PATH_ESCAPED|g" \
+    "$SERVICE_TEMPLATE" | \
+    "${SUDO[@]}" install -m 0644 /dev/stdin "/etc/systemd/system/${SERVICE_NAME}.service"
+
+  "${SUDO[@]}" systemctl daemon-reload
+  "${SUDO[@]}" systemctl enable "$SERVICE_NAME.service"
+  "${SUDO[@]}" systemctl restart "$SERVICE_NAME.service"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --env-file)
@@ -122,6 +164,10 @@ while [[ $# -gt 0 ]]; do
       INSTALL_SERVICE=1
       shift
       ;;
+    --restart)
+      RESTART_SERVICE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -145,6 +191,29 @@ ENV_FILE="$(cd -- "$(dirname -- "$ENV_FILE")" && pwd)/$(basename -- "$ENV_FILE")
 
 validate_env
 
+if [[ -z "$PORT" ]]; then
+  PORT="$(read_env_value APP_PORT)"
+fi
+PORT="${PORT:-8000}"
+[[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 )) || \
+  fail "端口必须是 1-65535 之间的数字: $PORT"
+
+if [[ -z "$OPENCLAW_BIN" ]]; then
+  OPENCLAW_BIN="$(read_env_value OPENCLAW_BIN)"
+fi
+OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
+OPENCLAW_PATH="$(command -v "$OPENCLAW_BIN" || true)"
+[[ "$OPENCLAW_PATH" == /* && -x "$OPENCLAW_PATH" ]] || \
+  fail "找不到可执行的 OpenClaw: $OPENCLAW_BIN。请在 .env 中设置 OPENCLAW_BIN 的绝对路径，例如 /home/ubuntu/.npm-global/bin/openclaw"
+OPENCLAW_DIR="$(dirname -- "$OPENCLAW_PATH")"
+
+if (( RESTART_SERVICE == 1 )); then
+  install_service_unit
+  info "systemd 服务已刷新并重启: $SERVICE_NAME"
+  info "查看日志: ${SUDO[*]:-} journalctl -u $SERVICE_NAME -f"
+  exit 0
+fi
+
 require_command "$PYTHON_BIN"
 require_command "$PNPM_BIN"
 require_command node
@@ -152,19 +221,6 @@ require_command node
 if ! version_at_least_3_10 "$PYTHON_BIN"; then
   fail "Python 版本必须是 3.10 或更高"
 fi
-
-if [[ -z "$OPENCLAW_BIN" ]]; then
-  OPENCLAW_BIN="$(read_env_value OPENCLAW_BIN)"
-fi
-OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
-require_command "$OPENCLAW_BIN"
-
-if [[ -z "$PORT" ]]; then
-  PORT="$(read_env_value APP_PORT)"
-fi
-PORT="${PORT:-8000}"
-[[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 )) || \
-  fail "端口必须是 1-65535 之间的数字: $PORT"
 
 VENV_DIR="$APP_DIR/.venv"
 VENV_PYTHON="$VENV_DIR/bin/python"
@@ -192,41 +248,7 @@ if (( INSTALL_SERVICE == 0 )); then
   exit 0
 fi
 
-require_command systemctl
-if [[ "$(id -u)" -eq 0 ]]; then
-  SUDO=()
-else
-  require_command sudo
-  SUDO=(sudo)
-fi
-
-id "$RUN_USER" >/dev/null 2>&1 || fail "systemd 运行用户不存在: $RUN_USER"
-RUN_GROUP="$(id -gn "$RUN_USER")"
-SYSTEM_PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
-SERVICE_TEMPLATE="$APP_DIR/scripts/openclaw-kb-manager.service.template"
-[[ -f "$SERVICE_TEMPLATE" ]] || fail "找不到 systemd 模板: $SERVICE_TEMPLATE"
-
-APP_DIR_ESCAPED="$(sed_escape "$APP_DIR")"
-ENV_FILE_ESCAPED="$(sed_escape "$ENV_FILE")"
-RUN_USER_ESCAPED="$(sed_escape "$RUN_USER")"
-RUN_GROUP_ESCAPED="$(sed_escape "$RUN_GROUP")"
-PORT_ESCAPED="$(sed_escape "$PORT")"
-SYSTEM_PATH_ESCAPED="$(sed_escape "$SYSTEM_PATH")"
-
-info "写入 systemd 服务: ${SERVICE_NAME}.service"
-sed \
-  -e "s|@APP_DIR@|$APP_DIR_ESCAPED|g" \
-  -e "s|@ENV_FILE@|$ENV_FILE_ESCAPED|g" \
-  -e "s|@RUN_USER@|$RUN_USER_ESCAPED|g" \
-  -e "s|@RUN_GROUP@|$RUN_GROUP_ESCAPED|g" \
-  -e "s|@PORT@|$PORT_ESCAPED|g" \
-  -e "s|@SYSTEM_PATH@|$SYSTEM_PATH_ESCAPED|g" \
-  "$SERVICE_TEMPLATE" | \
-  "${SUDO[@]}" install -m 0644 /dev/stdin "/etc/systemd/system/${SERVICE_NAME}.service"
-
-"${SUDO[@]}" systemctl daemon-reload
-"${SUDO[@]}" systemctl enable "$SERVICE_NAME.service"
-"${SUDO[@]}" systemctl restart "$SERVICE_NAME.service"
+install_service_unit
 
 info "systemd 服务已部署并重启: $SERVICE_NAME"
 info "查看日志: ${SUDO[*]:-} journalctl -u $SERVICE_NAME -f"

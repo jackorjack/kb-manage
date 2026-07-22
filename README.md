@@ -61,3 +61,17 @@ The deployment script assumes the server already has Python 3.10+, Node.js, pnpm
    ```
 
 The service runs with one Uvicorn worker and listens on the `APP_PORT` value from `.env` (or port `8000`). Use `--port` to override it for the generated systemd unit. The service user must have access to the configured `APP_DATA_DIR`, OpenClaw workspace, and mapped knowledge-base directories.
+
+After changing `.env`, refresh the systemd unit and restart without reinstalling dependencies:
+
+```bash
+./scripts/deploy.sh --restart
+```
+
+On Ubuntu, if OpenClaw was installed through nvm or an npm user directory, configure its absolute executable path first:
+
+```bash
+command -v openclaw
+# set OPENCLAW_BIN=/absolute/path/from-the-command-output in .env
+./scripts/deploy.sh --restart
+```
