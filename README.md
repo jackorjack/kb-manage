@@ -10,6 +10,8 @@ A local administration backend for managing Markdown knowledge-base files, conve
 
 The repository can use the bundled Codex Python and Node runtimes during local verification.
 
+Knowledge bases are linked to existing OpenClaw agents. The manager never creates agents automatically. When an agent has one `memorySearch.extraPaths` entry, its directory is used automatically; otherwise the directory is entered or selected during knowledge-base creation. One OpenClaw agent can be linked to one managed knowledge base.
+
 ## Setup
 
 ```bash

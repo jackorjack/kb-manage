@@ -82,47 +82,85 @@ class OpenClawService:
         except json.JSONDecodeError as exc:
             raise OpenClawError("OpenClaw returned invalid JSON") from exc
 
-    def ensure_agent(self, agent_id: str, workspace: Path, documents_path: Path) -> Dict[str, str]:
-        workspace.mkdir(parents=True, exist_ok=True)
-        try:
-            agents = self._json_command(["agents", "list", "--json"])
-        except OpenClawError:
-            agents = []
-        if isinstance(agents, dict):
-            agents = agents.get("agents", [])
-        agents = agents if isinstance(agents, list) else []
-        if not any(item.get("id") == agent_id for item in agents if isinstance(item, dict)):
-            self.run(
-                [
-                    "agents",
-                    "add",
-                    agent_id,
-                    "--workspace",
-                    str(workspace),
-                    "--non-interactive",
-                    "--json",
-                ]
-            )
+    @staticmethod
+    def _agent_items(value: Any) -> List[Dict[str, Any]]:
+        if isinstance(value, dict):
+            value = value.get("agents", value.get("items", []))
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
-        agent_list = self._json_command(["config", "get", "agents.list", "--json"])
-        if not isinstance(agent_list, list):
-            raise OpenClawError("OpenClaw agents.list is not an array")
+    @staticmethod
+    def _agent_id(item: Dict[str, Any]) -> str:
+        return str(item.get("id") or item.get("agentId") or "").strip()
+
+    @classmethod
+    def _extra_paths(cls, item: Dict[str, Any]) -> List[str]:
+        memory_search = item.get("memorySearch") or item.get("memory_search") or {}
+        if not isinstance(memory_search, dict):
+            return []
+        paths = memory_search.get("extraPaths", memory_search.get("extra_paths", []))
+        if isinstance(paths, str):
+            paths = [paths]
+        return [path.strip() for path in paths if isinstance(path, str) and path.strip()]
+
+    def list_agents(self) -> List[Dict[str, Any]]:
+        listed = self._agent_items(self._json_command(["agents", "list", "--json"]))
+        configured = self._agent_items(self._json_command(["config", "get", "agents.list", "--json"]))
+        configured_by_id = {
+            self._agent_id(item): item for item in configured if self._agent_id(item)
+        }
+        result: List[Dict[str, Any]] = []
+        seen = set()
+        for item in [*listed, *configured]:
+            agent_id = self._agent_id(item)
+            if not agent_id or agent_id in seen:
+                continue
+            seen.add(agent_id)
+            config = configured_by_id.get(agent_id, {})
+            result.append(
+                {
+                    "id": agent_id,
+                    "name": str(item.get("name") or config.get("name") or agent_id),
+                    "workspace": str(
+                        item.get("workspace")
+                        or item.get("agentDir")
+                        or config.get("workspace")
+                        or config.get("agentDir")
+                        or ""
+                    ),
+                    "extra_paths": self._extra_paths(config) or self._extra_paths(item),
+                }
+            )
+        return result
+
+    def _configured_agent(self, agent_id: str):
+        agent_list = self._agent_items(self._json_command(["config", "get", "agents.list", "--json"]))
         index = next(
-            (i for i, item in enumerate(agent_list) if isinstance(item, dict) and item.get("id") == agent_id),
+            (i for i, item in enumerate(agent_list) if self._agent_id(item) == agent_id),
             None,
         )
         if index is None:
-            raise OpenClawError(f"OpenClaw agent was not created: {agent_id}")
-        self.run(
-            [
-                "config",
-                "set",
-                f"agents.list[{index}].memorySearch.extraPaths",
-                json.dumps([str(documents_path)], ensure_ascii=False),
-                "--strict-json",
-            ]
-        )
-        return {"agent_id": agent_id, "workspace": str(workspace), "path": str(documents_path)}
+            raise OpenClawError(f"OpenClaw agent not found: {agent_id}")
+        return index, agent_list[index]
+
+    def configure_agent(self, agent_id: str, documents_path: Path) -> Dict[str, str]:
+        index, agent = self._configured_agent(agent_id)
+        configured_paths = self._extra_paths(agent)
+        path = str(documents_path)
+        if path not in configured_paths:
+            self.run(
+                [
+                    "config",
+                    "set",
+                    f"agents.list[{index}].memorySearch.extraPaths",
+                    json.dumps([*configured_paths, path], ensure_ascii=False),
+                    "--strict-json",
+                ]
+            )
+        return {
+            "agent_id": agent_id,
+            "workspace": str(agent.get("workspace") or agent.get("agentDir") or ""),
+            "path": str(documents_path),
+        }
 
     def index(self, agent_id: str, force: bool = False) -> CommandResult:
         arguments = ["memory", "index", "--agent", agent_id]

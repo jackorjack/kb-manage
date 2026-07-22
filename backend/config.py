@@ -24,10 +24,8 @@ def _int(value: str, default: int) -> int:
         return default
 
 
-def _path(value: str, default: Path, *, expand_user: bool = False) -> Path:
+def _path(value: str, default: Path) -> Path:
     candidate = Path(value) if value else default
-    if expand_user:
-        candidate = candidate.expanduser()
     if not candidate.is_absolute():
         candidate = PROJECT_ROOT / candidate
     return candidate.resolve()
@@ -44,7 +42,6 @@ class Settings:
     admin_initial_password: str
     openclaw_bin: str
     openclaw_config_path: Optional[str]
-    openclaw_agent_workspace_root: Path
     openclaw_timeout_seconds: int
     max_upload_bytes: int
     max_conversion_output_bytes: int
@@ -78,11 +75,6 @@ class Settings:
             admin_initial_password=env.get("ADMIN_INITIAL_PASSWORD", "change-me-before-use"),
             openclaw_bin=env.get("OPENCLAW_BIN", "openclaw"),
             openclaw_config_path=env.get("OPENCLAW_CONFIG_PATH") or None,
-            openclaw_agent_workspace_root=_path(
-                env.get("OPENCLAW_AGENT_WORKSPACE_ROOT"),
-                Path.home() / ".openclaw" / "kb-workspaces",
-                expand_user=True,
-            ),
             openclaw_timeout_seconds=_int(env.get("OPENCLAW_TIMEOUT_SECONDS"), 3600),
             max_upload_bytes=_int(env.get("MAX_UPLOAD_BYTES"), 50 * 1024 * 1024),
             max_conversion_output_bytes=_int(

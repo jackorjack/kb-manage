@@ -19,7 +19,8 @@ class PasswordChangeRequest(BaseModel):
 
 class KnowledgeBaseCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    path: str = Field(min_length=1, max_length=4096)
+    agentId: str = Field(min_length=1, max_length=256)
+    path: Optional[str] = Field(default=None, min_length=1, max_length=4096)
 
 
 class KnowledgeBaseUpdate(BaseModel):

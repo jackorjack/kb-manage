@@ -152,16 +152,51 @@ function Modal({ title, children, onClose }) {
 
 function CreateKbModal({ onClose, onCreated }) {
   const [name, setName] = useState("");
+  const [agents, setAgents] = useState([]);
+  const [agentId, setAgentId] = useState("");
   const [path, setPath] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [agentsLoading, setAgentsLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    api("/api/openclaw/agents")
+      .then((result) => {
+        if (!active) return;
+        setAgents(result.items);
+        const first = result.items.find((agent) => !agent.used);
+        if (first) {
+          setAgentId(first.id);
+          if (first.extraPaths?.length === 1) setPath(first.extraPaths[0]);
+        }
+      })
+      .catch((err) => active && setError(err.message))
+      .finally(() => active && setAgentsLoading(false));
+    return () => { active = false; };
+  }, []);
+
+  const selectedAgent = agents.find((agent) => agent.id === agentId);
+  const availableAgents = agents.filter((agent) => !agent.used);
+  const configuredPaths = selectedAgent?.extraPaths || [];
+
+  function selectAgent(event) {
+    const nextId = event.target.value;
+    const nextAgent = agents.find((agent) => agent.id === nextId);
+    setAgentId(nextId);
+    setPath(nextAgent?.extraPaths?.length === 1 ? nextAgent.extraPaths[0] : "");
+  }
 
   async function submit(event) {
     event.preventDefault();
+    if (!agentId || selectedAgent?.used) return setError("请选择一个未关联知识库的 OpenClaw Agent");
     setBusy(true);
     setError("");
     try {
-      const result = await api("/api/knowledge-bases", { method: "POST", body: JSON.stringify({ name, path }) });
+      const result = await api("/api/knowledge-bases", {
+        method: "POST",
+        body: JSON.stringify({ name, agentId, path: path || undefined }),
+      });
       onCreated(result);
       onClose();
     } catch (err) {
@@ -175,10 +210,26 @@ function CreateKbModal({ onClose, onCreated }) {
     <Modal title="新建知识库" onClose={onClose}>
       <form className="modal-form" onSubmit={submit}>
         <label>知识库名称<input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：产品文档" /></label>
-        <label>映射目录<input value={path} onChange={(event) => setPath(event.target.value)} placeholder="/srv/openclaw/knowledge/products" /></label>
-        <p className="field-hint">目录必须是服务器上的绝对路径。目录不存在时会创建最后一级目录。</p>
+        <label>关联 Agent
+          <select value={agentId} onChange={selectAgent} disabled={agentsLoading || !agents.length}>
+            <option value="">{agentsLoading ? "正在读取 Agent..." : "选择已有 Agent"}</option>
+            {agents.map((agent) => <option key={agent.id} value={agent.id} disabled={agent.used}>{agent.name} · {agent.id}{agent.used ? "（已关联）" : ""}</option>)}
+          </select>
+        </label>
+        <label>知识库目录
+          {configuredPaths.length > 1 ? (
+            <select value={path} onChange={(event) => setPath(event.target.value)}>
+              <option value="">选择 Agent 的记忆目录</option>
+              {configuredPaths.map((configuredPath) => <option key={configuredPath} value={configuredPath}>{configuredPath}</option>)}
+            </select>
+          ) : (
+            <input value={path} readOnly={configuredPaths.length === 1} onChange={(event) => setPath(event.target.value)} placeholder="/srv/openclaw/knowledge/products" />
+          )}
+        </label>
+        <p className="field-hint">已有 Agent 只有一个记忆目录时会自动使用；没有目录时请填写服务器上的绝对路径。管理后台不会自动创建 Agent。</p>
+        {!agentsLoading && !availableAgents.length && <p className="field-hint">没有可关联的 Agent，请先在 OpenClaw 中创建未关联的 Agent。</p>}
         <ErrorNotice message={error} />
-        <div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy}>{busy ? <LoaderCircle className="spin" size={16} /> : <Plus size={16} />}{busy ? "正在配置" : "创建知识库"}</button></div>
+        <div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy || agentsLoading || !agentId || selectedAgent?.used}>{busy ? <LoaderCircle className="spin" size={16} /> : <Plus size={16} />}{busy ? "正在配置" : "创建知识库"}</button></div>
       </form>
     </Modal>
   );
@@ -280,7 +331,7 @@ function JobPanel({ job, onClose }) {
   return <aside className="job-panel"><div className="job-panel-header"><div><p className="eyebrow">RUN DETAIL</p><h3>同步任务</h3></div><button className="icon-button" title="关闭任务详情" onClick={onClose}><X size={17} /></button></div><div className="job-summary"><StatusPill status={job.status} phase={job.phase} /><span>{job.mode === "force" ? "强制重建" : "自动同步"}</span></div><div className="job-timeline"><div className={job.phase === "converting" ? "current" : ""}><span>01</span><strong>转换文档</strong></div><div className={job.phase === "publishing" ? "current" : ""}><span>02</span><strong>写入目录</strong></div><div className={job.phase === "indexing" ? "current" : ""}><span>03</span><strong>执行索引</strong></div></div>{job.files?.length > 0 && <div className="job-files">{job.files.map((file) => <div key={file.source_name}><span>{file.source_name}</span><small className={file.status === "failed" ? "danger-text" : ""}>{file.status === "converted" ? "converted" : file.status}</small></div>)}</div>}{job.error && <div className="job-error"><AlertTriangle size={15} />{job.error}</div>}<div className="log-block"><div className="log-label">COMMAND OUTPUT</div><pre>{job.stdout || job.stderr || "等待任务输出..."}</pre></div><div className="job-time">创建于 {formatTime(job.createdAt)}{job.finishedAt && ` · 完成于 ${formatTime(job.finishedAt)}`}</div></aside>;
 }
 
-function Workspace({ kb, onRefresh, onUpload, onIndex, busy, onShowJob }) {
+function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob }) {
   const [documents, setDocuments] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -310,7 +361,7 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, busy, onShowJob }) {
     }
   }
 
-  return <main className="workspace"><header className="workspace-header"><div><p className="eyebrow">KNOWLEDGE BASE / {kb.slug}</p><h1>{kb.name}</h1><div className="path-line"><FolderOpen size={14} />{kb.path}<span className="separator">·</span>{kb.agentId}</div></div><div className="header-actions"><button className="ghost-button" disabled={busy} onClick={onRefresh}><RefreshCw size={16} className={busy ? "spin" : ""} />刷新</button><button className="primary-button" disabled={busy} onClick={onUpload}><Upload size={16} />导入文档</button></div></header><ErrorNotice message={error} onClose={() => setError("")} />{busy && <div className="busy-banner"><LoaderCircle size={16} className="spin" /><span>后台任务正在运行，文件操作暂时锁定</span><button onClick={() => onShowJob(kb.activeJob || kb.latestJob)}>查看任务 <ChevronRight size={14} /></button></div>}<section className="metric-row"><div className="metric"><span>文档数量</span><strong>{documents.length.toString().padStart(2, "0")}</strong><small>Markdown files</small></div><div className="metric"><span>当前状态</span><strong className="metric-status"><StatusPill status={kb.latestJob?.status} phase={kb.latestJob?.phase} /></strong><small>{kb.latestJob ? formatTime(kb.latestJob.finishedAt || kb.latestJob.createdAt) : "尚未执行索引"}</small></div><div className="metric"><span>存储目录</span><strong><HardDrive size={20} /></strong><small>external directory</small></div><div className="metric accent"><span>检索 agent</span><strong>{kb.agentId.replace("kb-", "")}</strong><small>isolated memory scope</small></div></section><section className="documents-section"><div className="section-heading"><div><p className="eyebrow">DOCUMENT REGISTER</p><h2>文件目录 <span>{documents.length}</span></h2></div><div className="section-tools"><button className="icon-button" title="刷新文件列表" onClick={loadDocuments}><RefreshCw size={16} /></button><button className="force-button" disabled={busy} onClick={() => onIndex(true)}><Zap size={15} />强制同步</button></div></div><div className="table-wrap"><table><thead><tr><th>文件名称</th><th>类型</th><th>大小</th><th>更新时间</th><th className="action-col">操作</th></tr></thead><tbody>{loading ? <tr><td colSpan="5" className="table-empty"><LoaderCircle className="spin" size={18} />正在读取目录</td></tr> : documents.length === 0 ? <tr><td colSpan="5" className="table-empty"><FileText size={22} /><span>目录中还没有 Markdown 文档</span><button className="text-button" disabled={busy} onClick={onUpload}>导入第一批文档</button></td></tr> : documents.map((document) => <tr key={document.id}><td><div className="file-name"><div className="file-icon"><FileText size={16} /></div><span>{document.name}</span></div></td><td><span className="file-type">{document.sourceExt === ".docx" ? "DOCX → MD" : "MARKDOWN"}</span></td><td>{formatBytes(document.sizeBytes)}</td><td>{formatTime(document.modifiedAt)}</td><td className="action-col"><button className="icon-button danger-icon" disabled={busy} title="删除文件" onClick={() => remove(document)}><Trash2 size={16} /></button></td></tr>)}</tbody></table></div></section></main>;
+  return <main className="workspace"><header className="workspace-header"><div><p className="eyebrow">KNOWLEDGE BASE / {kb.slug}</p><h1>{kb.name}</h1><div className="path-line"><FolderOpen size={14} />{kb.path}<span className="separator">·</span>{kb.agentId}</div></div><div className="header-actions"><button className="ghost-button" disabled={busy} onClick={onRefresh}><RefreshCw size={16} className={busy ? "spin" : ""} />刷新</button><button className="primary-button" disabled={busy} onClick={onUpload}><Upload size={16} />导入文档</button><button className="icon-button danger-icon" disabled={busy} title="删除知识库" onClick={() => onDelete(kb)}><Trash2 size={17} /></button></div></header><ErrorNotice message={error} onClose={() => setError("")} />{busy && <div className="busy-banner"><LoaderCircle size={16} className="spin" /><span>后台任务正在运行，文件操作暂时锁定</span><button onClick={() => onShowJob(kb.activeJob || kb.latestJob)}>查看任务 <ChevronRight size={14} /></button></div>}<section className="metric-row"><div className="metric"><span>文档数量</span><strong>{documents.length.toString().padStart(2, "0")}</strong><small>Markdown files</small></div><div className="metric"><span>当前状态</span><strong className="metric-status"><StatusPill status={kb.latestJob?.status} phase={kb.latestJob?.phase} /></strong><small>{kb.latestJob ? formatTime(kb.latestJob.finishedAt || kb.latestJob.createdAt) : "尚未执行索引"}</small></div><div className="metric"><span>存储目录</span><strong><HardDrive size={20} /></strong><small>external directory</small></div><div className="metric accent"><span>检索 agent</span><strong>{kb.agentId.replace("kb-", "")}</strong><small>isolated memory scope</small></div></section><section className="documents-section"><div className="section-heading"><div><p className="eyebrow">DOCUMENT REGISTER</p><h2>文件目录 <span>{documents.length}</span></h2></div><div className="section-tools"><button className="icon-button" title="刷新文件列表" onClick={loadDocuments}><RefreshCw size={16} /></button><button className="force-button" disabled={busy} onClick={() => onIndex(true)}><Zap size={15} />强制同步</button></div></div><div className="table-wrap"><table><thead><tr><th>文件名称</th><th>类型</th><th>大小</th><th>更新时间</th><th className="action-col">操作</th></tr></thead><tbody>{loading ? <tr><td colSpan="5" className="table-empty"><LoaderCircle className="spin" size={18} />正在读取目录</td></tr> : documents.length === 0 ? <tr><td colSpan="5" className="table-empty"><FileText size={22} /><span>目录中还没有 Markdown 文档</span><button className="text-button" disabled={busy} onClick={onUpload}>导入第一批文档</button></td></tr> : documents.map((document) => <tr key={document.id}><td><div className="file-name"><div className="file-icon"><FileText size={16} /></div><span>{document.name}</span></div></td><td><span className="file-type">{document.sourceExt === ".docx" ? "DOCX → MD" : "MARKDOWN"}</span></td><td>{formatBytes(document.sizeBytes)}</td><td>{formatTime(document.modifiedAt)}</td><td className="action-col"><button className="icon-button danger-icon" disabled={busy} title="删除文件" onClick={() => remove(document)}><Trash2 size={16} /></button></td></tr>)}</tbody></table></div></section></main>;
 }
 
 function App() {
@@ -375,10 +426,23 @@ function App() {
     loadKbs(current?.id);
   }
 
+  async function removeKnowledgeBase(kb) {
+    if (!window.confirm(`确认删除知识库「${kb.name}」？只会删除管理记录，不会删除映射目录和其中的文件。`)) return;
+    try {
+      await api(`/api/knowledge-bases/${kb.id}`, { method: "DELETE" });
+      setItems((currentItems) => currentItems.filter((item) => item.id !== kb.id));
+      setSelected((currentSelected) => currentSelected?.id === kb.id ? null : currentSelected);
+      setJob(null);
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   if (authLoading) return <div className="loading-screen"><LoaderCircle className="spin" size={22} />正在连接管理后台</div>;
   if (!user) return <Login onLogin={(nextUser) => { setUser(nextUser); }} />;
 
-  return <div className="app-shell"><Sidebar items={items} selected={current} onSelect={(item) => { setSelected(item); setShowSystem(false); }} onCreate={() => setShowCreate(true)} onLogout={logout} systemOpen={showSystem} onSystem={() => setShowSystem((value) => !value)} /><div className="main-stage"><div className="topline"><span><Activity size={14} /> CONTROL ROOM / LOCAL</span><span>{new Date().toLocaleDateString("zh-CN", { weekday: "long", month: "long", day: "numeric" })}</span></div>{error && <div className="stage-error"><ErrorNotice message={error} onClose={() => setError("")} /></div>}{showSystem ? <SystemPanel onClose={() => setShowSystem(false)} /> : current ? <Workspace kb={current} busy={busy} onRefresh={() => loadKbs(current.id)} onUpload={() => setShowUpload(true)} onIndex={(force) => api(`/api/knowledge-bases/${current.id}/index`, { method: "POST", body: JSON.stringify({ force }) }).then(newJob).catch((err) => setError(err.message))} onShowJob={setJob} /> : <EmptyState onCreate={() => setShowCreate(true)} />}</div>{job && <JobPanel job={job} onClose={() => setJob(null)} />}{showCreate && <CreateKbModal onClose={() => setShowCreate(false)} onCreated={created} />}{showUpload && current && <UploadModal kb={current} onClose={() => setShowUpload(false)} onUploaded={newJob} />}</div>;
+  return <div className="app-shell"><Sidebar items={items} selected={current} onSelect={(item) => { setSelected(item); setShowSystem(false); }} onCreate={() => setShowCreate(true)} onLogout={logout} systemOpen={showSystem} onSystem={() => setShowSystem((value) => !value)} /><div className="main-stage"><div className="topline"><span><Activity size={14} /> CONTROL ROOM / LOCAL</span><span>{new Date().toLocaleDateString("zh-CN", { weekday: "long", month: "long", day: "numeric" })}</span></div>{error && <div className="stage-error"><ErrorNotice message={error} onClose={() => setError("")} /></div>}{showSystem ? <SystemPanel onClose={() => setShowSystem(false)} /> : current ? <Workspace kb={current} busy={busy} onRefresh={() => loadKbs(current.id)} onUpload={() => setShowUpload(true)} onDelete={removeKnowledgeBase} onIndex={(force) => api(`/api/knowledge-bases/${current.id}/index`, { method: "POST", body: JSON.stringify({ force }) }).then(newJob).catch((err) => setError(err.message))} onShowJob={setJob} /> : <EmptyState onCreate={() => setShowCreate(true)} />}</div>{job && <JobPanel job={job} onClose={() => setJob(null)} />}{showCreate && <CreateKbModal onClose={() => setShowCreate(false)} onCreated={created} />}{showUpload && current && <UploadModal kb={current} onClose={() => setShowUpload(false)} onUploaded={newJob} />}</div>;
 }
 
 createRoot(document.getElementById("root")).render(<App />);

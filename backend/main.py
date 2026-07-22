@@ -297,20 +297,73 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         rows = db.fetchall("SELECT * FROM knowledge_bases ORDER BY name COLLATE NOCASE")
         return {"items": [_serialize_kb(row, db) for row in rows]}
 
+    @app.get("/api/openclaw/agents")
+    def list_openclaw_agents(request: Request):
+        _session(request)
+        db: Database = request.app.state.db
+        used_agent_ids = {row["agent_id"] for row in db.fetchall("SELECT agent_id FROM knowledge_bases")}
+        try:
+            agents = request.app.state.openclaw.list_agents()
+        except OpenClawError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {
+            "items": [
+                {
+                    "id": agent["id"],
+                    "name": agent["name"],
+                    "workspace": agent["workspace"],
+                    "extraPaths": agent["extra_paths"],
+                    "used": agent["id"] in used_agent_ids,
+                }
+                for agent in agents
+            ]
+        }
+
     @app.post("/api/knowledge-bases")
     def create_knowledge_base(request: Request, body: KnowledgeBaseCreate):
         session = _write_guard(request)
         db: Database = request.app.state.db
         try:
-            path = resolve_knowledge_base_path(body.path)
+            agent = next(
+                (item for item in request.app.state.openclaw.list_agents() if item["id"] == body.agentId.strip()),
+                None,
+            )
+        except OpenClawError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if agent is None:
+            raise HTTPException(status_code=400, detail=f"OpenClaw agent not found: {body.agentId}")
+        linked = db.fetchone("SELECT name FROM knowledge_bases WHERE agent_id = ?", (agent["id"],))
+        if linked is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"OpenClaw agent is already linked to knowledge base: {linked['name']}",
+            )
+
+        raw_path = (body.path or "").strip()
+        configured_paths = agent["extra_paths"]
+        if not raw_path:
+            if len(configured_paths) == 1:
+                raw_path = configured_paths[0]
+            elif len(configured_paths) > 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="selected agent has multiple memory directories; choose one",
+                )
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="selected agent has no configured memory directory; enter a path",
+                )
+        try:
+            path = resolve_knowledge_base_path(raw_path)
             existing = [Path(row["path"]) for row in db.fetchall("SELECT path FROM knowledge_bases")]
             assert_paths_do_not_overlap(path, existing)
         except FileValidationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         kb_id = str(uuid.uuid4())
         slug = _unique_slug(db, body.name)
-        agent_id = f"kb-{uuid.uuid4().hex[:12]}"
-        workspace = app_settings.openclaw_agent_workspace_root / agent_id
+        agent_id = agent["id"]
+        workspace = agent["workspace"]
         now = utc_now()
         db.execute(
             """
@@ -320,7 +373,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             (kb_id, body.name.strip(), slug, str(path), agent_id, str(workspace), now, now),
         )
         try:
-            request.app.state.openclaw.ensure_agent(agent_id, workspace, path)
+            request.app.state.openclaw.configure_agent(agent_id, path)
         except OpenClawError as exc:
             db.execute(
                 "UPDATE knowledge_bases SET status = 'error', error = ?, updated_at = ? WHERE id = ?",
@@ -338,9 +391,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         _write_guard(request)
         kb = _require_kb(request, knowledge_base_id)
         try:
-            request.app.state.openclaw.ensure_agent(
-                kb["agent_id"], Path(kb["agent_workspace"]), Path(kb["path"])
-            )
+            request.app.state.openclaw.configure_agent(kb["agent_id"], Path(kb["path"]))
         except OpenClawError as exc:
             request.app.state.db.execute(
                 "UPDATE knowledge_bases SET status = 'error', error = ?, updated_at = ? WHERE id = ?",
@@ -379,9 +430,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     )
                 ]
                 assert_paths_do_not_overlap(path, existing)
-                request.app.state.openclaw.ensure_agent(
-                    kb["agent_id"], Path(kb["agent_workspace"]), path
-                )
+                request.app.state.openclaw.configure_agent(kb["agent_id"], path)
             except (FileValidationError, OpenClawError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             db.execute(
