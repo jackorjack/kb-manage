@@ -16,6 +16,7 @@ import {
   LogOut,
   Plus,
   RefreshCw,
+  Search,
   Settings,
   ShieldCheck,
   Trash2,
@@ -111,7 +112,33 @@ function Login({ onLogin }) {
   return (
     <main className="login-shell">
       <aside className="login-aside">
-        <div className="aside-index">01 <span>/</span> 03</div>
+        <svg className="aside-art" viewBox="0 0 320 440" fill="none" aria-hidden="true">
+          <g className="art-docs">
+            <rect x="70" y="330" width="150" height="90" rx="2" transform="rotate(-7 145 375)" />
+            <rect x="82" y="322" width="150" height="90" rx="2" transform="rotate(-2 157 367)" />
+            <rect x="92" y="316" width="150" height="90" rx="2" />
+            <line x1="106" y1="336" x2="212" y2="336" />
+            <line x1="106" y1="350" x2="212" y2="350" />
+            <line x1="106" y1="364" x2="182" y2="364" />
+          </g>
+          <g className="art-links">
+            <path d="M167 316 C167 250 96 236 96 176" />
+            <path d="M167 316 C167 262 232 244 232 190" />
+            <path d="M167 316 C167 240 167 210 167 132" />
+            <path d="M96 176 L167 132" />
+            <path d="M232 190 L167 132" />
+            <path d="M96 176 L232 190" />
+            <path d="M167 132 L138 74" />
+            <path d="M167 132 L214 88" />
+          </g>
+          <g className="art-nodes">
+            <circle cx="96" cy="176" r="6" />
+            <circle cx="232" cy="190" r="6" />
+            <circle className="node-teal" cx="167" cy="132" r="9" />
+            <circle cx="138" cy="74" r="5" />
+            <circle className="node-rust" cx="214" cy="88" r="7" />
+          </g>
+        </svg>
         <div className="aside-rule" />
         <p className="eyebrow">INDEX ROOM</p>
         <h2>Documents in.<br /><em>Answers out.</em></h2>
@@ -343,7 +370,7 @@ function SystemPanel({ onClose }) {
     } catch (err) { setPasswordError(err.message); }
     finally { setPasswordBusy(false); }
   }
-  return <section className="system-panel"><div className="section-heading"><div><p className="eyebrow">RUNTIME CHECK</p><h2>系统状态</h2></div><button className="icon-button" title="关闭" onClick={onClose}><X size={18} /></button></div>{data?.error ? <ErrorNotice message={data.error} /> : <div className="system-grid">{[["OpenClaw", data?.openclaw?.ok, data?.openclaw?.version || data?.openclaw?.error], ["MarkItDown", data?.markitdown?.ok, "in-process converter"], ["SQLite", data?.database?.ok, data?.database?.path], ["Worker", data?.worker?.running, data?.worker?.running ? "accepting jobs" : "stopped"]].map(([label, ok, detail]) => <div className="system-card" key={label}><div className={`system-icon ${ok ? "ok" : "bad"}`}>{ok ? <Check size={17} /> : <AlertTriangle size={17} />}</div><div><strong>{label}</strong><span>{detail || "not available"}</span></div></div>)}</div>}<form className="password-form" onSubmit={updatePassword}><div><p className="eyebrow">ACCOUNT SECURITY</p><h3>修改管理员密码</h3></div><label>当前密码<input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></label><label>新密码<input type="password" minLength="8" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label>{passwordError && <ErrorNotice message={passwordError} />}{passwordMessage && <div className="success-notice"><CheckCircle2 size={15} />{passwordMessage}</div>}<button className="primary-button" disabled={passwordBusy}>{passwordBusy ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}{passwordBusy ? "正在更新" : "更新密码"}</button></form></section>;
+  return <section className="system-panel"><div className="section-heading"><div><p className="eyebrow">RUNTIME CHECK</p><h2>系统状态</h2></div><button className="icon-button" title="关闭" onClick={onClose}><X size={18} /></button></div>{data?.error ? <ErrorNotice message={data.error} /> : <div className="system-grid">{[["OpenClaw", data?.openclaw?.ok, data?.openclaw?.version || data?.openclaw?.error], ["MarkItDown", data?.markitdown?.ok, "in-process converter"], ["SQLite", data?.database?.ok, data?.database?.path], ["Worker", data?.worker?.running, data?.worker?.running ? "accepting jobs" : "stopped"]].map(([label, ok, detail]) => <div className="system-card" key={label}><div className={`system-icon ${ok ? "ok" : "bad"}`}>{ok ? <Check size={17} /> : <AlertTriangle size={17} />}</div><div><strong>{label}</strong><span>{detail || "not available"}</span></div></div>)}</div>}<form className="password-form" onSubmit={updatePassword}><div className="password-intro"><p className="eyebrow">ACCOUNT SECURITY</p><h3>修改管理员密码</h3><p className="password-hint">新密码至少 8 位，更新后当前会话保持登录。</p></div><div className="password-fields"><label>当前密码<input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} autoComplete="current-password" /></label><label>新密码<input type="password" minLength="8" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} autoComplete="new-password" /></label></div>{passwordError && <ErrorNotice message={passwordError} />}{passwordMessage && <div className="success-notice"><CheckCircle2 size={15} />{passwordMessage}</div>}<div className="password-actions"><button className="primary-button" disabled={passwordBusy}>{passwordBusy ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}{passwordBusy ? "正在更新" : "更新密码"}</button></div></form></section>;
 }
 
 function JobPanel({ job, onClose }) {
@@ -359,7 +386,13 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const [query, setQuery] = useState("");
   const completedJobId = ["succeeded", "failed"].includes(kb.latestJob?.status) ? kb.latestJob.id : "";
+  const filtered = useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    if (!keyword) return documents;
+    return documents.filter((document) => document.name.toLowerCase().includes(keyword));
+  }, [documents, query]);
 
   async function loadDocuments() {
     setLoading(true);
@@ -378,6 +411,7 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob
   useEffect(() => {
     setDeleteTarget(null);
     setDeleteError("");
+    setQuery("");
   }, [kb.id]);
 
   async function refreshAll() {
@@ -426,8 +460,16 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob
         </section>
         <section className="documents-section">
           <div className="section-heading">
-            <div><p className="eyebrow">DOCUMENT REGISTER</p><h2>文件目录 <span>{documents.length}</span></h2></div>
-            <div className="section-tools"><button className="icon-button" title="刷新文件列表" onClick={loadDocuments}><RefreshCw size={16} /></button><button className="force-button" disabled={busy} onClick={() => onIndex(true)}><Zap size={15} />强制同步</button></div>
+            <div><p className="eyebrow">DOCUMENT REGISTER</p><h2>文件目录 <span>{query ? `${filtered.length} / ${documents.length}` : documents.length}</span></h2></div>
+            <div className="section-tools">
+              <div className="doc-search">
+                <Search size={15} />
+                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="按文件名筛选" aria-label="按文件名筛选文档" />
+                {query && <button className="doc-search-clear" title="清除筛选" onClick={() => setQuery("")}><X size={14} /></button>}
+              </div>
+              <button className="icon-button" title="刷新文件列表" onClick={loadDocuments}><RefreshCw size={16} /></button>
+              <button className="force-button" disabled={busy} onClick={() => onIndex(true)}><Zap size={15} />强制同步</button>
+            </div>
           </div>
           <div className="table-wrap">
             <table>
@@ -437,7 +479,9 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob
                   <tr><td colSpan="5" className="table-empty"><LoaderCircle className="spin" size={18} />正在读取目录</td></tr>
                 ) : documents.length === 0 ? (
                   <tr><td colSpan="5" className="table-empty"><FileText size={22} /><span>目录中还没有 Markdown 文档</span><button className="text-button" disabled={busy} onClick={onUpload}>导入第一批文档</button></td></tr>
-                ) : documents.map((document) => (
+                ) : filtered.length === 0 ? (
+                  <tr><td colSpan="5" className="table-empty"><Search size={22} /><span>没有匹配「{query}」的文档</span><button className="text-button" onClick={() => setQuery("")}>清除筛选</button></td></tr>
+                ) : filtered.map((document) => (
                   <tr key={document.id}>
                     <td><div className="file-name"><div className="file-icon"><FileText size={16} /></div><span>{document.name}</span></div></td>
                     <td><span className="file-type">{document.sourceExt === ".docx" ? "DOCX → MD" : "MARKDOWN"}</span></td>
