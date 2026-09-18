@@ -27,23 +27,19 @@ def wait_for_job(client: TestClient, job_id: str):
     raise AssertionError("job did not finish")
 
 
-def make_client(tmp_path, monkeypatch):
+def make_client(tmp_path, monkeypatch, state=None):
     state_path = tmp_path / "openclaw-state.json"
-    state_path.write_text(
-        json.dumps(
+    state_path.write_text(json.dumps(state or {
+        "defaults": {},
+        "agents": [
             {
-                "defaults": {},
-                "agents": [
-                    {
-                        "id": "assistant",
-                        "name": "Assistant",
-                        "workspace": str(tmp_path / "agent-workspace"),
-                    }
-                ],
-                "commands": [],
+                "id": "assistant",
+                "name": "Assistant",
+                "workspace": str(tmp_path / "agent-workspace"),
             }
-        )
-    )
+        ],
+        "commands": [],
+    }))
     monkeypatch.setenv("FAKE_OPENCLAW_STATE", str(state_path))
     settings = Settings.from_env(
         {
@@ -198,6 +194,131 @@ def test_agent_inherits_global_default_memory_directory(tmp_path, monkeypatch):
         )
         assert created.status_code == 200, created.text
         assert created.json()["path"] == str(inherited_path)
+
+    state = json.loads(state_path.read_text())
+    assert not any(command[:2] == ["config", "set"] for command in state["commands"])
+
+
+def test_current_entries_and_memory_search_are_read_and_written(tmp_path, monkeypatch):
+    workspace = tmp_path / "main-workspace"
+    state = {
+        "config": {
+            "agents": {
+                "defaults": {"workspace": str(workspace)},
+                "entries": {
+                    "main": {
+                        "name": "Main",
+                        "workspace": str(workspace),
+                        "memory": {"search": {"extraPaths": ["agent-docs"]}},
+                    }
+                },
+            },
+            "memory": {"search": {"extraPaths": ["global-docs"]}},
+        },
+        "commands": [],
+    }
+    client, state_path = make_client(tmp_path, monkeypatch, state)
+    managed_path = tmp_path / "managed-docs"
+
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        agents = client.get("/api/openclaw/agents")
+        assert agents.status_code == 200
+        assert agents.json()["items"] == [
+            {
+                "id": "main",
+                "name": "Main",
+                "workspace": str(workspace),
+                "extraPaths": [str(workspace / "global-docs"), str(workspace / "agent-docs")],
+                "pathSource": "agent",
+                "used": False,
+            }
+        ]
+
+        created = client.post(
+            "/api/knowledge-bases",
+            json={"name": "当前配置", "agentId": "main", "path": str(managed_path)},
+            headers=headers,
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["path"] == str(managed_path)
+
+    state = json.loads(state_path.read_text())
+    entry = state["config"]["agents"]["entries"]["main"]
+    assert entry["memory"]["search"]["extraPaths"] == ["agent-docs", str(managed_path)]
+    set_commands = [command for command in state["commands"] if command[:2] == ["config", "set"]]
+    assert set_commands[-1][2] == "agents.entries.main.memory.search.extraPaths"
+    assert json.loads(set_commands[-1][3]) == ["agent-docs", str(managed_path)]
+
+
+def test_current_global_memory_search_is_inherited_without_agent_write(tmp_path, monkeypatch):
+    workspace = tmp_path / "main-workspace"
+    state = {
+        "config": {
+            "agents": {
+                "defaults": {"workspace": str(workspace)},
+                "entries": {"main": {"name": "Main"}},
+            },
+            "memory": {"search": {"extraPaths": ["global-docs"]}},
+        },
+        "commands": [],
+    }
+    client, state_path = make_client(tmp_path, monkeypatch, state)
+    workspace.mkdir()
+
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        agents = client.get("/api/openclaw/agents")
+        assert agents.status_code == 200
+        assert agents.json()["items"][0]["extraPaths"] == [str(workspace / "global-docs")]
+        assert agents.json()["items"][0]["pathSource"] == "default"
+
+        created = client.post(
+            "/api/knowledge-bases",
+            json={"name": "全局当前配置", "agentId": "main"},
+            headers=headers,
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["path"] == str(workspace / "global-docs")
+
+    state = json.loads(state_path.read_text())
+    assert not any(command[:2] == ["config", "set"] for command in state["commands"])
+
+
+def test_current_agent_defaults_memory_search_is_inherited(tmp_path, monkeypatch):
+    workspace = tmp_path / "main-workspace"
+    state = {
+        "config": {
+            "agents": {
+                "defaults": {
+                    "workspace": str(workspace),
+                    "memory": {"search": {"extraPaths": ["default-docs"]}},
+                },
+                "entries": {"main": {"name": "Main"}},
+            }
+        },
+        "commands": [],
+    }
+    client, state_path = make_client(tmp_path, monkeypatch, state)
+    workspace.mkdir()
+
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        agents = client.get("/api/openclaw/agents")
+        assert agents.status_code == 200
+        assert agents.json()["items"][0]["extraPaths"] == [str(workspace / "default-docs")]
+        assert agents.json()["items"][0]["pathSource"] == "default"
+
+        created = client.post(
+            "/api/knowledge-bases",
+            json={"name": "默认当前配置", "agentId": "main"},
+            headers=headers,
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["path"] == str(workspace / "default-docs")
 
     state = json.loads(state_path.read_text())
     assert not any(command[:2] == ["config", "set"] for command in state["commands"])

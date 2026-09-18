@@ -85,7 +85,14 @@ class OpenClawService:
     @staticmethod
     def _agent_items(value: Any) -> List[Dict[str, Any]]:
         if isinstance(value, dict):
-            value = value.get("agents", value.get("items", []))
+            for key in ("agents", "items", "list", "entries"):
+                if key in value:
+                    return OpenClawService._agent_items(value[key])
+            return [
+                {**item, "id": item.get("id") or key}
+                for key, item in value.items()
+                if key != "defaults" and isinstance(item, dict)
+            ]
         return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
     @staticmethod
@@ -93,8 +100,22 @@ class OpenClawService:
         return str(item.get("id") or item.get("agentId") or "").strip()
 
     @classmethod
+    def _memory_search(cls, item: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(item, dict):
+            return {}
+        memory = item.get("memory")
+        if isinstance(memory, dict) and isinstance(memory.get("search"), dict):
+            return memory["search"]
+        legacy = item.get("memorySearch") or item.get("memory_search")
+        if isinstance(legacy, dict):
+            return legacy
+        if isinstance(item.get("search"), dict):
+            return item["search"]
+        return {}
+
+    @classmethod
     def _extra_paths(cls, item: Dict[str, Any]) -> List[str]:
-        memory_search = item.get("memorySearch") or item.get("memory_search") or {}
+        memory_search = cls._memory_search(item)
         if not isinstance(memory_search, dict):
             return []
         paths = memory_search.get("extraPaths", memory_search.get("extra_paths", []))
@@ -102,9 +123,9 @@ class OpenClawService:
             paths = [paths]
         return [path.strip() for path in paths if isinstance(path, str) and path.strip()]
 
-    @staticmethod
-    def _has_extra_paths(item: Dict[str, Any]) -> bool:
-        memory_search = item.get("memorySearch") or item.get("memory_search") or {}
+    @classmethod
+    def _has_extra_paths(cls, item: Dict[str, Any]) -> bool:
+        memory_search = cls._memory_search(item)
         return isinstance(memory_search, dict) and (
             "extraPaths" in memory_search or "extra_paths" in memory_search
         )
@@ -126,12 +147,46 @@ class OpenClawService:
         if not isinstance(value, dict):
             raise OpenClawError("OpenClaw agents configuration has an unexpected format")
         defaults = value.get("defaults") if isinstance(value.get("defaults"), dict) else {}
-        configured = self._agent_items(value.get("list", []))
-        return defaults, configured
+        if "entries" in value:
+            return defaults, self._agent_items(value.get("entries")), "entries"
+        return defaults, self._agent_items(value.get("list", [])), "list"
+
+    def _memory_config(self) -> Dict[str, Any]:
+        try:
+            value = self._json_command(["config", "get", "memory", "--json"])
+        except OpenClawError:
+            # Older configs may not have a top-level memory block yet.
+            return {}
+        if not isinstance(value, dict):
+            raise OpenClawError("OpenClaw memory configuration has an unexpected format")
+        return value
+
+    @classmethod
+    def _effective_paths(
+        cls,
+        agent: Dict[str, Any],
+        defaults: Dict[str, Any],
+        memory: Dict[str, Any],
+        roster: str,
+    ) -> tuple[List[str], str]:
+        agent_paths = cls._extra_paths(agent)
+        global_paths = cls._extra_paths(memory)
+        default_paths = cls._extra_paths(defaults)
+        if roster == "entries":
+            raw_paths = [*global_paths, *default_paths, *agent_paths]
+            source = "agent" if cls._has_extra_paths(agent) else "default"
+        elif cls._has_extra_paths(agent):
+            raw_paths = agent_paths
+            source = "agent"
+        else:
+            raw_paths = [*global_paths, *default_paths]
+            source = "default"
+        return raw_paths, source if raw_paths else ""
 
     def list_agents(self) -> List[Dict[str, Any]]:
         listed = self._agent_items(self._json_command(["agents", "list", "--json"]))
-        defaults, configured = self._agents_config()
+        defaults, configured, roster = self._agents_config()
+        memory = self._memory_config()
         listed_by_id = {self._agent_id(item): item for item in listed if self._agent_id(item)}
         configured_by_id = {
             self._agent_id(item): item for item in configured if self._agent_id(item)
@@ -154,12 +209,7 @@ class OpenClawService:
                 or ""
             )
             own_config = config if config else listed_item
-            if self._has_extra_paths(own_config):
-                raw_paths = self._extra_paths(own_config)
-                path_source = "agent"
-            else:
-                raw_paths = self._extra_paths(defaults)
-                path_source = "default" if raw_paths else ""
+            raw_paths, path_source = self._effective_paths(own_config, defaults, memory, roster)
             result.append(
                 {
                     "id": agent_id,
@@ -172,33 +222,42 @@ class OpenClawService:
         return result
 
     def _configured_agent(self, agent_id: str):
-        defaults, agent_list = self._agents_config()
+        defaults, agent_list, roster = self._agents_config()
         index = next(
             (i for i, item in enumerate(agent_list) if self._agent_id(item) == agent_id),
             None,
         )
         if index is None:
             raise OpenClawError(f"OpenClaw agent not found: {agent_id}")
-        return index, agent_list[index], defaults
+        selector = agent_id if roster == "entries" else index
+        return selector, agent_list[index], defaults, roster
 
     def configure_agent(self, agent_id: str, documents_path: Path) -> Dict[str, str]:
-        index, agent, defaults = self._configured_agent(agent_id)
+        selector, agent, defaults, roster = self._configured_agent(agent_id)
+        memory = self._memory_config()
         workspace = str(
             agent.get("workspace")
             or agent.get("agentDir")
             or defaults.get("workspace")
             or ""
         )
-        source = agent if self._has_extra_paths(agent) else defaults
-        configured_paths = self._resolve_extra_paths(self._extra_paths(source), workspace)
+        raw_paths, _ = self._effective_paths(agent, defaults, memory, roster)
+        configured_paths = self._resolve_extra_paths(raw_paths, workspace)
         path = str(documents_path)
         if path not in configured_paths:
+            if roster == "entries":
+                config_path = f"agents.entries.{agent_id}.memory.search.extraPaths"
+                write_paths = self._extra_paths(agent)
+            else:
+                config_path = f"agents.list[{selector}].memorySearch.extraPaths"
+                source = agent if self._has_extra_paths(agent) else defaults
+                write_paths = self._resolve_extra_paths(self._extra_paths(source), workspace)
             self.run(
                 [
                     "config",
                     "set",
-                    f"agents.list[{index}].memorySearch.extraPaths",
-                    json.dumps([*configured_paths, path], ensure_ascii=False),
+                    config_path,
+                    json.dumps([*write_paths, path], ensure_ascii=False),
                     "--strict-json",
                 ]
             )
