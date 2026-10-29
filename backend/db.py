@@ -1,11 +1,12 @@
-"""SQLite persistence with one connection per operation."""
+"""SQLite persistence over a single shared connection."""
 
 from __future__ import annotations
 
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
+from typing import Any, Iterator, List, Optional, Sequence
 
 from .security import hash_password
 from .utils import utc_now
@@ -80,46 +81,75 @@ CREATE INDEX IF NOT EXISTS idx_documents_kb ON documents(knowledge_base_id, name
 
 
 class Database:
+    """Thread-safe database wrapper.
+
+    SQLite runs in serialized mode, so one shared connection guarded by an
+    RLock is both safe and far cheaper than the previous design, where every
+    fetchone/fetchall/execute opened a brand-new connection (each one
+    busy-waiting up to 30 s on lock contention). With per-operation
+    connections a handful of concurrent requests could hold dozens of open
+    connections and stall the whole app behind the write lock.
+    """
+
     def __init__(self, path: Path):
         self.path = path
+        self._connection: Optional[sqlite3.Connection] = None
+        self._lock = threading.RLock()
+
+    def _conn(self) -> sqlite3.Connection:
+        if self._connection is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(
+                self.path,
+                timeout=30,
+                isolation_level=None,
+                check_same_thread=False,
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA busy_timeout = 30000")
+            self._connection = connection
+        return self._connection
 
     def connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA busy_timeout = 30000")
-        return connection
+        """Return the shared connection (kept for call-site compatibility)."""
+        with self._lock:
+            return self._conn()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
 
     def initialize(self) -> None:
-        with self.connect() as connection:
-            connection.executescript(SCHEMA)
+        with self._lock:
+            self._conn().executescript(SCHEMA)
 
     @contextmanager
     def transaction(self, immediate: bool = False) -> Iterator[sqlite3.Connection]:
-        connection = self.connect()
-        try:
+        with self._lock:
+            connection = self._conn()
             connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+            try:
+                yield connection
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def fetchone(self, sql: str, params: Sequence[Any] = ()) -> Optional[sqlite3.Row]:
-        with self.connect() as connection:
-            return connection.execute(sql, params).fetchone()
+        with self._lock:
+            return self._conn().execute(sql, params).fetchone()
 
     def fetchall(self, sql: str, params: Sequence[Any] = ()) -> List[sqlite3.Row]:
-        with self.connect() as connection:
-            return connection.execute(sql, params).fetchall()
+        with self._lock:
+            return self._conn().execute(sql, params).fetchall()
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
-        with self.connect() as connection:
-            connection.execute(sql, params)
+        with self._lock:
+            self._conn().execute(sql, params)
 
     def seed_admin(self, username: str, password: str) -> None:
         if not username or not password:

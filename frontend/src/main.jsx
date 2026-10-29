@@ -28,6 +28,15 @@ import "./styles.css";
 
 let csrfToken = "";
 
+// The app may be served from the domain root ("/") or a sub-path such as
+// "/kb-manage/" behind nginx. The backend injects <base href="..."> into the
+// served index.html; resolve API calls off that base so the deployment prefix
+// is honored regardless of the address-bar path.
+function apiUrl(path) {
+  const base = document.baseURI || "/";
+  return new URL(String(path).replace(/^\/+/, ""), base).pathname;
+}
+
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (options.body && !(options.body instanceof FormData)) {
@@ -36,11 +45,16 @@ async function api(path, options = {}) {
   if (csrfToken && options.method && options.method !== "GET") {
     headers.set("X-CSRF-Token", csrfToken);
   }
-  const response = await fetch(path, { ...options, headers, credentials: "include" });
+  const response = await fetch(apiUrl(path), { ...options, headers, credentials: "include" });
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
-    const message = typeof body === "object" && body?.detail ? body.detail : `请求失败（${response.status}）`;
+    let detail = body?.detail;
+    if (Array.isArray(detail)) {
+      // FastAPI 422 validation errors return detail as a list of objects.
+      detail = detail.map((item) => item?.msg || JSON.stringify(item)).join("；");
+    }
+    const message = typeof body === "object" && detail ? detail : `请求失败（${response.status}）`;
     throw new Error(message);
   }
   return body;
@@ -59,7 +73,16 @@ function formatTime(value) {
 
 function statusMeta(status, phase) {
   if (status === "running" || status === "queued") {
-    return { label: phase === "converting" ? "转换中" : phase === "publishing" ? "写入中" : "索引中", tone: "busy", icon: LoaderCircle };
+    const phaseLabel = {
+      queued: "排队中",
+      starting: "启动中",
+      converting: "转换中",
+      conversion_failed: "转换失败",
+      publishing: "写入中",
+      deleting: "删除中",
+      indexing: "索引中",
+    }[phase] || "处理中";
+    return { label: phaseLabel, tone: "busy", icon: LoaderCircle };
   }
   if (status === "succeeded") return { label: "已同步", tone: "success", icon: CheckCircle2 };
   if (status === "failed") return { label: "同步失败", tone: "danger", icon: AlertTriangle };
@@ -376,7 +399,7 @@ function SystemPanel({ onClose }) {
 function JobPanel({ job, onClose }) {
   if (!job) return null;
   const meta = statusMeta(job.status, job.phase);
-  return <aside className="job-panel"><div className="job-panel-header"><div><p className="eyebrow">RUN DETAIL</p><h3>同步任务</h3></div><button className="icon-button" title="关闭任务详情" onClick={onClose}><X size={17} /></button></div><div className="job-summary"><StatusPill status={job.status} phase={job.phase} /><span>{job.mode === "force" ? "强制重建" : "自动同步"}</span></div><div className="job-timeline"><div className={job.phase === "converting" ? "current" : ""}><span>01</span><strong>转换文档</strong></div><div className={job.phase === "publishing" ? "current" : ""}><span>02</span><strong>写入目录</strong></div><div className={job.phase === "indexing" ? "current" : ""}><span>03</span><strong>执行索引</strong></div></div>{job.files?.length > 0 && <div className="job-files">{job.files.map((file) => <div key={file.source_name}><span>{file.source_name}</span><small className={file.status === "failed" ? "danger-text" : ""}>{file.status === "converted" ? "converted" : file.status}</small></div>)}</div>}{job.error && <div className="job-error"><AlertTriangle size={15} />{job.error}</div>}<div className="log-block"><div className="log-label">COMMAND OUTPUT</div><pre>{job.stdout || job.stderr || "等待任务输出..."}</pre></div><div className="job-time">创建于 {formatTime(job.createdAt)}{job.finishedAt && ` · 完成于 ${formatTime(job.finishedAt)}`}</div></aside>;
+  return <aside className="job-panel"><div className="job-panel-header"><div><p className="eyebrow">RUN DETAIL</p><h3>同步任务</h3></div><button className="icon-button" title="关闭任务详情" onClick={onClose}><X size={17} /></button></div><div className="job-summary"><StatusPill status={job.status} phase={job.phase} /><span>{job.mode === "force" ? "强制重建" : "自动同步"}</span></div><div className="job-timeline"><div className={job.phase === "converting" ? "current" : ""}><span>01</span><strong>转换文档</strong></div><div className={job.phase === "publishing" ? "current" : ""}><span>02</span><strong>写入目录</strong></div><div className={job.phase === "indexing" ? "current" : ""}><span>03</span><strong>执行索引</strong></div></div>{job.files?.length > 0 && <div className="job-files">{job.files.map((file) => <div key={file.source_name}><span>{file.source_name}</span><small className={file.status === "failed" ? "danger-text" : ""}>{file.status === "converted" ? "converted" : file.status}</small></div>)}</div>}{job.error && <div className="job-error"><AlertTriangle size={15} />{job.error}</div>}<div className="log-block"><div className="log-label">COMMAND OUTPUT</div><pre>{[job.stdout, job.stderr].filter(Boolean).join("\n") || "等待任务输出..."}</pre></div><div className="job-time">创建于 {formatTime(job.createdAt)}{job.finishedAt && ` · 完成于 ${formatTime(job.finishedAt)}`}</div></aside>;
 }
 
 function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob }) {

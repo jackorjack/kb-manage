@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -34,6 +34,8 @@ def _cap(value: str, limit: int = 200_000) -> str:
 class OpenClawService:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._active_process: Optional[subprocess.Popen] = None
+        self._process_lock = threading.Lock()
 
     def _environment(self) -> Dict[str, str]:
         environment = os.environ.copy()
@@ -44,29 +46,47 @@ class OpenClawService:
     def run(self, arguments: List[str], timeout: Optional[int] = None) -> CommandResult:
         command = [self.settings.openclaw_bin, *arguments]
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=str(Path(__file__).resolve().parents[1]),
                 env=self._environment(),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout or self.settings.openclaw_timeout_seconds,
-                check=False,
             )
         except FileNotFoundError as exc:
             raise OpenClawError(f"OpenClaw executable not found: {self.settings.openclaw_bin}") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise OpenClawError("OpenClaw command timed out") from exc
+        with self._process_lock:
+            self._active_process = process
+        try:
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=timeout or self.settings.openclaw_timeout_seconds
+                )
+            except subprocess.TimeoutExpired as exc:
+                process.kill()
+                process.communicate()
+                raise OpenClawError("OpenClaw command timed out") from exc
+        finally:
+            with self._process_lock:
+                self._active_process = None
         result = CommandResult(
             args=command,
-            returncode=completed.returncode,
-            stdout=_cap(completed.stdout or ""),
-            stderr=_cap(completed.stderr or ""),
+            returncode=process.returncode,
+            stdout=_cap(stdout or ""),
+            stderr=_cap(stderr or ""),
         )
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "unknown OpenClaw error"
             raise OpenClawError(f"OpenClaw command failed ({result.returncode}): {detail}")
         return result
+
+    def terminate_active(self) -> None:
+        """Kill the in-flight OpenClaw subprocess, if any (used on shutdown)."""
+        with self._process_lock:
+            process = self._active_process
+        if process is not None and process.poll() is None:
+            process.terminate()
 
     def health(self) -> Dict[str, Any]:
         try:
@@ -266,6 +286,56 @@ class OpenClawService:
             "workspace": workspace,
             "path": str(documents_path),
         }
+
+    def remove_agent_path(self, agent_id: str, documents_path: Path, keep: Optional[Path] = None) -> None:
+        """Drop a knowledge-base directory from the agent's own extraPaths.
+
+        Only touches paths the agent owns: entries rosters write
+        agents.entries.<id>.memory.search.extraPaths, list rosters write
+        agents.list[i].memorySearch.extraPaths — exactly where configure_agent
+        appended them. Inherited defaults/global paths are left alone so other
+        agents are never affected. `keep` protects a path that should stay
+        (e.g. a remap that reuses the same directory).
+        """
+        selector, agent, defaults, roster = self._configured_agent(agent_id)
+        workspace = str(
+            agent.get("workspace")
+            or agent.get("agentDir")
+            or defaults.get("workspace")
+            or ""
+        )
+        target = str(documents_path)
+        keep_value = str(keep) if keep is not None else None
+
+        if roster == "entries":
+            config_path = f"agents.entries.{agent_id}.memory.search.extraPaths"
+            write_paths = self._extra_paths(agent)
+        else:
+            config_path = f"agents.list[{selector}].memorySearch.extraPaths"
+            write_paths = self._resolve_extra_paths(self._extra_paths(agent), workspace)
+
+        def _resolved(raw: str) -> str:
+            path = Path(raw).expanduser()
+            if not path.is_absolute() and workspace:
+                path = Path(workspace).expanduser() / path
+            return str(path.resolve()) if path.is_absolute() else raw
+
+        remaining = [
+            raw
+            for raw in write_paths
+            if _resolved(raw) != target or (keep_value is not None and _resolved(raw) == keep_value)
+        ]
+        if len(remaining) == len(write_paths):
+            return
+        self.run(
+            [
+                "config",
+                "set",
+                config_path,
+                json.dumps(remaining, ensure_ascii=False),
+                "--strict-json",
+            ]
+        )
 
     def index(self, agent_id: str, force: bool = False) -> CommandResult:
         arguments = ["memory", "index", "--agent", agent_id]

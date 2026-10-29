@@ -31,11 +31,20 @@ def _path(value: str, default: Path) -> Path:
     return candidate.resolve()
 
 
+def _base_path(value: Optional[str]) -> str:
+    """Normalize APP_BASE_PATH to '' (root) or '/sub/path' (no trailing slash)."""
+    if not value:
+        return ""
+    cleaned = value.strip().strip("/")
+    return f"/{cleaned}" if cleaned else ""
+
+
 @dataclass(frozen=True)
 class Settings:
     app_env: str
     app_host: str
     app_port: int
+    base_path: str
     app_data_dir: Path
     secret_key: str
     admin_username: str
@@ -49,6 +58,7 @@ class Settings:
     app_start_worker: bool
     frontend_dist: Path
     frontend_origin: str
+    cookie_secure: bool
 
     @property
     def database_path(self) -> Path:
@@ -65,14 +75,21 @@ class Settings:
     @classmethod
     def from_env(cls, values: Optional[Mapping[str, str]] = None) -> "Settings":
         env = os.environ if values is None else values
+        admin_password = env.get("ADMIN_INITIAL_PASSWORD", "change-me-before-use")
+        if len(admin_password) < 8:
+            raise ValueError(
+                "ADMIN_INITIAL_PASSWORD must contain at least 8 characters "
+                f"(got {len(admin_password)}); the admin account cannot be seeded safely"
+            )
         return cls(
             app_env=env.get("APP_ENV", "development"),
             app_host=env.get("APP_HOST", "127.0.0.1"),
             app_port=_int(env.get("APP_PORT"), 8000),
+            base_path=_base_path(env.get("APP_BASE_PATH")),
             app_data_dir=_path(env.get("APP_DATA_DIR"), PROJECT_ROOT / "runtime"),
             secret_key=env.get("APP_SECRET_KEY", "development-only-secret-change-me"),
             admin_username=env.get("ADMIN_USERNAME", "admin"),
-            admin_initial_password=env.get("ADMIN_INITIAL_PASSWORD", "change-me-before-use"),
+            admin_initial_password=admin_password,
             openclaw_bin=env.get("OPENCLAW_BIN", "openclaw"),
             openclaw_config_path=env.get("OPENCLAW_CONFIG_PATH") or None,
             openclaw_timeout_seconds=_int(env.get("OPENCLAW_TIMEOUT_SECONDS"), 3600),
@@ -84,4 +101,11 @@ class Settings:
             app_start_worker=_bool(env.get("APP_START_WORKER"), True),
             frontend_dist=_path(env.get("FRONTEND_DIST"), PROJECT_ROOT / "frontend" / "dist"),
             frontend_origin=env.get("FRONTEND_ORIGIN", "http://localhost:5173"),
+            # Default: secure cookies in production (https). Set APP_COOKIE_SECURE=false
+            # when serving over plain http (e.g. an internal http://ip:port proxy),
+            # or the browser will refuse to store the session cookie entirely.
+            cookie_secure=_bool(
+                env.get("APP_COOKIE_SECURE"),
+                env.get("APP_ENV", "development") == "production",
+            ),
         )

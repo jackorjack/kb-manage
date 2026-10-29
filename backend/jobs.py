@@ -9,6 +9,7 @@ import time
 import traceback
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -91,6 +92,9 @@ class JobWorker:
 
     def stop(self) -> None:
         self.stop_event.set()
+        # Kill any in-flight OpenClaw subprocess so shutdown doesn't leave an
+        # orphaned `memory index` running for up to the timeout window.
+        self.openclaw.terminate_active()
         if self.thread:
             self.thread.join(timeout=3)
 
@@ -199,6 +203,9 @@ class JobWorker:
                 target = assert_target_path(Path(knowledge_base["path"]), item["target_name"])
                 stat = target.stat()
                 now = utc_now()
+                modified_at = datetime.fromtimestamp(
+                    stat.st_mtime, timezone.utc
+                ).replace(microsecond=0).isoformat()
                 connection.execute(
                     """
                     INSERT INTO documents(id, knowledge_base_id, name, source_ext, size_bytes, sha256, modified_at, created_at, updated_at)
@@ -217,7 +224,7 @@ class JobWorker:
                         item["source_ext"],
                         stat.st_size,
                         sha256_file(target),
-                        utc_now(),
+                        modified_at,
                         now,
                         now,
                     ),
@@ -229,9 +236,14 @@ class JobWorker:
     def process_delete(self, row, payload: Dict[str, Any]) -> None:
         knowledge_base = self._knowledge_base(row["knowledge_base_id"])
         self._set_phase(row["id"], "deleting")
+        names = payload.get("names", [])
+        # Remove files first; filesystem deletes cannot roll back, so they must
+        # not sit inside the DB transaction. The document row cleanup below is
+        # a pure-DB transaction, and reconcile_documents self-heals any drift.
+        for name in names:
+            remove_document_file(Path(knowledge_base["path"]), name)
         with self.db.transaction(immediate=True) as connection:
-            for name in payload.get("names", []):
-                remove_document_file(Path(knowledge_base["path"]), name)
+            for name in names:
                 connection.execute(
                     "DELETE FROM documents WHERE knowledge_base_id = ? AND name = ?",
                     (knowledge_base["id"], name),

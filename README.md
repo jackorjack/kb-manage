@@ -77,3 +77,50 @@ command -v openclaw
 # set OPENCLAW_BIN=/absolute/path/from-the-command-output in .env
 ./scripts/deploy.sh --restart
 ```
+
+## Reverse proxy under a sub-path
+
+To serve the manager from `http://<host>/kb-manage/` alongside other apps on
+the same nginx server:
+
+1. Set the external prefix in `.env`:
+
+   ```bash
+   APP_BASE_PATH=/kb-manage
+   ```
+
+   `APP_BASE_PATH` sets FastAPI's `root_path`, so generated URLs and the
+   session cookie are scoped to `/kb-manage`. The frontend resolves asset and
+   API URLs from an injected `<base href>`, so the same `frontend/dist` bundle
+   works at the domain root and under any sub-path.
+
+2. Forward requests **with the prefix intact** (no trailing slash on
+   `proxy_pass`, so nginx passes `/kb-manage/...` through and FastAPI strips
+   `root_path` itself):
+
+   ```nginx
+   location /kb-manage/ {
+       proxy_pass http://127.0.0.1:8000;
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
+   }
+   ```
+
+3. If the site is plain `http://` (no TLS), allow a non-Secure session cookie
+   or the browser will never store it:
+
+   ```bash
+   APP_COOKIE_SECURE=false
+   ```
+
+4. Rebuild the frontend if it was already built, then restart:
+
+   ```bash
+   pnpm --dir frontend build
+   ./scripts/deploy.sh --restart
+   ```
+
+   Visiting `http://<host>/kb-manage/` now loads the UI, and its API calls land
+   on `http://<host>/kb-manage/api/...`.

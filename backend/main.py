@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import hmac
 import re
+import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
@@ -89,14 +91,16 @@ def _serialize_document(row, path: Path) -> Dict[str, Any]:
     }
 
 
-def _serialize_kb(row, db: Database) -> Dict[str, Any]:
-    active = get_active_job(db)
+def _serialize_kb(row, db: Database, active=None) -> Dict[str, Any]:
+    if active is None:
+        active = get_active_job(db)
     latest = db.fetchone(
         "SELECT * FROM jobs WHERE knowledge_base_id = ? ORDER BY created_at DESC LIMIT 1",
         (row["id"],),
     )
     path = Path(row["path"])
     document_count = len(list_markdown_files(path))
+    own_active = bool(active) and active["knowledge_base_id"] == row["id"]
     return {
         "id": row["id"],
         "name": row["name"],
@@ -107,8 +111,10 @@ def _serialize_kb(row, db: Database) -> Dict[str, Any]:
         "status": row["status"],
         "error": row["error"],
         "documentCount": document_count,
+        # isBusy is global on purpose: a single worker serializes every job, so
+        # a running job anywhere should block writes on every knowledge base.
         "isBusy": bool(active),
-        "activeJob": _serialize_job(active) if active and active["knowledge_base_id"] == row["id"] else None,
+        "activeJob": _serialize_job(active) if own_active else None,
         "latestJob": _serialize_job(latest),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
@@ -130,7 +136,8 @@ def _session(request: Request):
 
 def _write_guard(request: Request):
     session = _session(request)
-    if request.headers.get("x-csrf-token") != session["csrf_token"]:
+    token = request.headers.get("x-csrf-token") or ""
+    if not hmac.compare_digest(token, session["csrf_token"]):
         raise HTTPException(status_code=403, detail="invalid csrf token")
     return session
 
@@ -229,7 +236,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         yield
         worker.stop()
 
-    app = FastAPI(title="OpenClaw Knowledge Base Manager", lifespan=lifespan)
+    app = FastAPI(
+        title="OpenClaw Knowledge Base Manager",
+        lifespan=lifespan,
+        # root_path tells the app its external mount prefix (e.g. /kb-manage
+        # behind nginx). Routes still match on /api/...; root_path only affects
+        # generated URLs and OpenAPI/docs links.
+        root_path=app_settings.base_path,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[app_settings.frontend_origin],
@@ -260,9 +274,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             token,
             max_age=app_settings.session_ttl_seconds,
             httponly=True,
-            secure=app_settings.app_env == "production",
+            secure=app_settings.cookie_secure,
             samesite="lax",
-            path="/",
+            # Scope the cookie to the external mount path so this app's session
+            # doesn't collide with sibling apps on the same host/port.
+            path=app_settings.base_path or "/",
         )
         return result
 
@@ -273,7 +289,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         from fastapi.responses import JSONResponse
 
         response = JSONResponse({"ok": True})
-        response.delete_cookie("kb_session", path="/")
+        response.delete_cookie("kb_session", path=app_settings.base_path or "/")
         return response
 
     @app.get("/api/auth/me")
@@ -295,7 +311,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         _session(request)
         db: Database = request.app.state.db
         rows = db.fetchall("SELECT * FROM knowledge_bases ORDER BY name COLLATE NOCASE")
-        return {"items": [_serialize_kb(row, db) for row in rows]}
+        active = get_active_job(db)
+        return {"items": [_serialize_kb(row, db, active) for row in rows]}
 
     @app.get("/api/openclaw/agents")
     def list_openclaw_agents(request: Request):
@@ -366,13 +383,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         agent_id = agent["id"]
         workspace = agent["workspace"]
         now = utc_now()
-        db.execute(
-            """
-            INSERT INTO knowledge_bases(id, name, slug, path, agent_id, agent_workspace, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'provisioning', ?, ?)
-            """,
-            (kb_id, body.name.strip(), slug, str(path), agent_id, str(workspace), now, now),
-        )
+        try:
+            db.execute(
+                """
+                INSERT INTO knowledge_bases(id, name, slug, path, agent_id, agent_workspace, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'provisioning', ?, ?)
+                """,
+                (kb_id, body.name.strip(), slug, str(path), agent_id, str(workspace), now, now),
+            )
+        except sqlite3.IntegrityError as exc:
+            # Another request linked this agent (or path/slug) between the
+            # check above and this insert.
+            raise HTTPException(
+                status_code=409,
+                detail="knowledge base conflicts with an existing mapping",
+            ) from exc
         try:
             request.app.state.openclaw.configure_agent(agent_id, path)
         except OpenClawError as exc:
@@ -417,13 +442,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         _write_guard(request)
         kb = _ready_kb(request, knowledge_base_id)
         db: Database = request.app.state.db
-        if body.path is not None and str(resolve_knowledge_base_path(body.path)) != kb["path"]:
+        path = None
+        if body.path is not None:
+            try:
+                path = resolve_knowledge_base_path(body.path)
+            except FileValidationError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if path is not None and str(path) != kb["path"]:
             _assert_not_busy(db)
             documents = list_markdown_files(Path(kb["path"]))
             if documents:
                 raise HTTPException(status_code=409, detail="cannot remap a knowledge base with documents")
             try:
-                path = resolve_knowledge_base_path(body.path)
                 existing = [
                     Path(row["path"])
                     for row in db.fetchall(
@@ -432,6 +462,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 ]
                 assert_paths_do_not_overlap(path, existing)
                 request.app.state.openclaw.configure_agent(kb["agent_id"], path)
+                request.app.state.openclaw.remove_agent_path(kb["agent_id"], kb["path"], keep=path)
             except (FileValidationError, OpenClawError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             db.execute(
@@ -448,8 +479,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @app.delete("/api/knowledge-bases/{knowledge_base_id}")
     def delete_knowledge_base(request: Request, knowledge_base_id: str):
         _write_guard(request)
-        _require_kb(request, knowledge_base_id)
+        kb = _require_kb(request, knowledge_base_id)
         _assert_not_busy(request.app.state.db)
+        # Detach the agent's memory path first so a partially-failed delete
+        # never leaves the agent indexing an unmanaged directory.
+        try:
+            request.app.state.openclaw.remove_agent_path(kb["agent_id"], Path(kb["path"]))
+        except OpenClawError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
         request.app.state.db.execute("DELETE FROM knowledge_bases WHERE id = ?", (knowledge_base_id,))
         return {"ok": True, "physicalDirectoryPreserved": True}
 
@@ -598,11 +635,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if assets.exists():
             app.mount("/assets", StaticFiles(directory=assets), name="assets")
 
+        index_html = (app_settings.frontend_dist / "index.html").read_text(encoding="utf-8")
+        # Inject the external mount path as <base> so relative asset URLs and
+        # the SPA's API resolver anchor to the deployment prefix — not to
+        # whatever path the user happens to have typed in the address bar.
+        base_href = f"{app_settings.base_path}/" if app_settings.base_path else "/"
+        index_html = index_html.replace("<head>", f'<head>\n    <base href="{base_href}" />', 1)
+
         @app.get("/{path:path}", include_in_schema=False)
         async def frontend(path: str):
-            if path.startswith("api/"):
+            if path == "api" or path.startswith("api/"):
                 raise HTTPException(status_code=404, detail="not found")
-            return FileResponse(app_settings.frontend_dist / "index.html")
+            return HTMLResponse(index_html)
 
     return app
 
