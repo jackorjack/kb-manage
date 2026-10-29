@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
     path TEXT NOT NULL UNIQUE,
     agent_id TEXT NOT NULL UNIQUE,
     agent_workspace TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'agent',
     status TEXT NOT NULL DEFAULT 'provisioning',
     error TEXT,
     created_at TEXT NOT NULL,
@@ -125,7 +126,17 @@ class Database:
 
     def initialize(self) -> None:
         with self._lock:
-            self._conn().executescript(SCHEMA)
+            connection = self._conn()
+            connection.executescript(SCHEMA)
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(knowledge_bases)")
+            }
+            if "scope" not in columns:
+                # Additive upgrade for databases created before public knowledge
+                # bases existed; existing rows keep their agent-scoped meaning.
+                connection.execute(
+                    "ALTER TABLE knowledge_bases ADD COLUMN scope TEXT NOT NULL DEFAULT 'agent'"
+                )
 
     @contextmanager
     def transaction(self, immediate: bool = False) -> Iterator[sqlite3.Connection]:

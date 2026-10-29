@@ -101,13 +101,15 @@ def _serialize_kb(row, db: Database, active=None) -> Dict[str, Any]:
     path = Path(row["path"])
     document_count = len(list_markdown_files(path))
     own_active = bool(active) and active["knowledge_base_id"] == row["id"]
+    public = _is_public(row)
     return {
         "id": row["id"],
         "name": row["name"],
         "slug": row["slug"],
         "path": row["path"],
-        "agentId": row["agent_id"],
-        "agentWorkspace": row["agent_workspace"],
+        "scope": "public" if public else "agent",
+        "agentId": None if public else row["agent_id"],
+        "agentWorkspace": None if public else row["agent_workspace"],
         "status": row["status"],
         "error": row["error"],
         "documentCount": document_count,
@@ -214,6 +216,40 @@ def _unique_slug(db: Database, name: str) -> str:
     return candidate
 
 
+PUBLIC_AGENT_PREFIX = "public:"
+
+
+def _is_public(row) -> bool:
+    return row["scope"] == "public"
+
+
+def _default_agent_path(agent: Dict[str, Any], public_paths) -> str:
+    """Pick the default directory for an agent knowledge base.
+
+    Public knowledge-base directories are excluded from the candidates. A single
+    remaining configured directory is used as before; otherwise the agent's
+    workspace `wiki` directory is the default.
+    """
+    candidates = [path for path in agent["extra_paths"] if path not in public_paths]
+    if len(candidates) == 1:
+        return candidates[0]
+    workspace = agent.get("workspace") or ""
+    return str((Path(workspace).expanduser() / "wiki").resolve()) if workspace else ""
+
+
+def _attach_path(openclaw: OpenClawService, kb, path: Path) -> bool:
+    """Register a knowledge-base directory with OpenClaw; True if config changed."""
+    if _is_public(kb):
+        return openclaw.configure_global_path(path)
+    return bool(openclaw.configure_agent(kb["agent_id"], path).get("changed"))
+
+
+def _detach_path(openclaw: OpenClawService, kb, path: Path, keep: Optional[Path] = None) -> bool:
+    if _is_public(kb):
+        return openclaw.remove_global_path(Path(path))
+    return openclaw.remove_agent_path(kb["agent_id"], path, keep=keep)
+
+
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app_settings = settings or Settings.from_env()
 
@@ -318,7 +354,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def list_openclaw_agents(request: Request):
         _session(request)
         db: Database = request.app.state.db
-        used_agent_ids = {row["agent_id"] for row in db.fetchall("SELECT agent_id FROM knowledge_bases")}
+        rows = db.fetchall("SELECT agent_id, path, scope FROM knowledge_bases")
+        used_agent_ids = {row["agent_id"] for row in rows if row["scope"] != "public"}
+        public_paths = {row["path"] for row in rows if row["scope"] == "public"}
         try:
             agents = request.app.state.openclaw.list_agents()
         except OpenClawError as exc:
@@ -329,49 +367,61 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "id": agent["id"],
                     "name": agent["name"],
                     "workspace": agent["workspace"],
-                    "extraPaths": agent["extra_paths"],
+                    # Public knowledge-base directories are shared by every
+                    # agent, so they are not offered as agent candidates.
+                    "extraPaths": [path for path in agent["extra_paths"] if path not in public_paths],
+                    "defaultPath": _default_agent_path(agent, public_paths),
                     "pathSource": agent["path_source"],
                     "used": agent["id"] in used_agent_ids,
                 }
                 for agent in agents
-            ]
+            ],
+            "publicDefaultPath": str(app_settings.public_kb_path),
         }
 
     @app.post("/api/knowledge-bases")
     def create_knowledge_base(request: Request, body: KnowledgeBaseCreate):
-        session = _write_guard(request)
+        _write_guard(request)
         db: Database = request.app.state.db
-        try:
-            agent = next(
-                (item for item in request.app.state.openclaw.list_agents() if item["id"] == body.agentId.strip()),
-                None,
-            )
-        except OpenClawError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        if agent is None:
-            raise HTTPException(status_code=400, detail=f"OpenClaw agent not found: {body.agentId}")
-        linked = db.fetchone("SELECT name FROM knowledge_bases WHERE agent_id = ?", (agent["id"],))
-        if linked is not None:
-            raise HTTPException(
-                status_code=409,
-                detail=f"OpenClaw agent is already linked to knowledge base: {linked['name']}",
-            )
-
+        public = body.scope == "public"
         raw_path = (body.path or "").strip()
-        configured_paths = agent["extra_paths"]
-        if not raw_path:
-            if len(configured_paths) == 1:
-                raw_path = configured_paths[0]
-            elif len(configured_paths) > 1:
-                raise HTTPException(
-                    status_code=400,
-                    detail="selected agent has multiple memory directories; choose one",
+        if public:
+            workspace = ""
+            if not raw_path:
+                raw_path = str(app_settings.public_kb_path)
+                Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
+        else:
+            agent_ref = (body.agentId or "").strip()
+            if not agent_ref:
+                raise HTTPException(status_code=400, detail="agentId is required for an agent knowledge base")
+            try:
+                agent = next(
+                    (item for item in request.app.state.openclaw.list_agents() if item["id"] == agent_ref),
+                    None,
                 )
-            else:
+            except OpenClawError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+            if agent is None:
+                raise HTTPException(status_code=400, detail=f"OpenClaw agent not found: {agent_ref}")
+            linked = db.fetchone(
+                "SELECT name FROM knowledge_bases WHERE agent_id = ? AND scope = 'agent'", (agent["id"],)
+            )
+            if linked is not None:
                 raise HTTPException(
-                    status_code=400,
-                    detail="selected agent has no configured memory directory; enter a path",
+                    status_code=409,
+                    detail=f"OpenClaw agent is already linked to knowledge base: {linked['name']}",
                 )
+            if not raw_path:
+                public_paths = {
+                    row["path"] for row in db.fetchall("SELECT path FROM knowledge_bases WHERE scope = 'public'")
+                }
+                raw_path = _default_agent_path(agent, public_paths)
+                if not raw_path:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="selected agent has no workspace; enter a path",
+                    )
+            workspace = agent["workspace"]
         try:
             path = resolve_knowledge_base_path(raw_path)
             existing = [Path(row["path"]) for row in db.fetchall("SELECT path FROM knowledge_bases")]
@@ -379,17 +429,28 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         except FileValidationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         kb_id = str(uuid.uuid4())
+        # agent_id is NOT NULL UNIQUE in the existing schema; public rows use a
+        # sentinel that can never match a real OpenClaw agent id.
+        agent_id = f"{PUBLIC_AGENT_PREFIX}{kb_id}" if public else agent["id"]
         slug = _unique_slug(db, body.name)
-        agent_id = agent["id"]
-        workspace = agent["workspace"]
         now = utc_now()
         try:
             db.execute(
                 """
-                INSERT INTO knowledge_bases(id, name, slug, path, agent_id, agent_workspace, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'provisioning', ?, ?)
+                INSERT INTO knowledge_bases(id, name, slug, path, agent_id, agent_workspace, scope, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'provisioning', ?, ?)
                 """,
-                (kb_id, body.name.strip(), slug, str(path), agent_id, str(workspace), now, now),
+                (
+                    kb_id,
+                    body.name.strip(),
+                    slug,
+                    str(path),
+                    agent_id,
+                    str(workspace),
+                    "public" if public else "agent",
+                    now,
+                    now,
+                ),
             )
         except sqlite3.IntegrityError as exc:
             # Another request linked this agent (or path/slug) between the
@@ -398,8 +459,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 status_code=409,
                 detail="knowledge base conflicts with an existing mapping",
             ) from exc
+        row = db.fetchone("SELECT * FROM knowledge_bases WHERE id = ?", (kb_id,))
         try:
-            request.app.state.openclaw.configure_agent(agent_id, path)
+            changed = _attach_path(request.app.state.openclaw, row, path)
         except OpenClawError as exc:
             db.execute(
                 "UPDATE knowledge_bases SET status = 'error', error = ?, updated_at = ? WHERE id = ?",
@@ -410,14 +472,16 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             "UPDATE knowledge_bases SET status = 'ready', error = NULL, updated_at = ? WHERE id = ?",
             (utc_now(), kb_id),
         )
-        return _serialize_kb(db.fetchone("SELECT * FROM knowledge_bases WHERE id = ?", (kb_id,)), db)
+        result = _serialize_kb(db.fetchone("SELECT * FROM knowledge_bases WHERE id = ?", (kb_id,)), db)
+        result["configChanged"] = changed
+        return result
 
     @app.post("/api/knowledge-bases/{knowledge_base_id}/repair")
     def repair_knowledge_base(request: Request, knowledge_base_id: str):
         _write_guard(request)
         kb = _require_kb(request, knowledge_base_id)
         try:
-            request.app.state.openclaw.configure_agent(kb["agent_id"], Path(kb["path"]))
+            _attach_path(request.app.state.openclaw, kb, Path(kb["path"]))
         except OpenClawError as exc:
             request.app.state.db.execute(
                 "UPDATE knowledge_bases SET status = 'error', error = ?, updated_at = ? WHERE id = ?",
@@ -443,6 +507,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         kb = _ready_kb(request, knowledge_base_id)
         db: Database = request.app.state.db
         path = None
+        config_changed = False
         if body.path is not None:
             try:
                 path = resolve_knowledge_base_path(body.path)
@@ -461,8 +526,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     )
                 ]
                 assert_paths_do_not_overlap(path, existing)
-                request.app.state.openclaw.configure_agent(kb["agent_id"], path)
-                request.app.state.openclaw.remove_agent_path(kb["agent_id"], kb["path"], keep=path)
+                attached = _attach_path(request.app.state.openclaw, kb, path)
+                detached = _detach_path(request.app.state.openclaw, kb, Path(kb["path"]), keep=path)
+                config_changed = attached or detached
             except (FileValidationError, OpenClawError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             db.execute(
@@ -474,7 +540,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "UPDATE knowledge_bases SET name = ?, updated_at = ? WHERE id = ?",
                 (body.name.strip(), utc_now(), knowledge_base_id),
             )
-        return _serialize_kb(db.fetchone("SELECT * FROM knowledge_bases WHERE id = ?", (knowledge_base_id,)), db)
+        result = _serialize_kb(db.fetchone("SELECT * FROM knowledge_bases WHERE id = ?", (knowledge_base_id,)), db)
+        result["configChanged"] = config_changed
+        return result
 
     @app.delete("/api/knowledge-bases/{knowledge_base_id}")
     def delete_knowledge_base(request: Request, knowledge_base_id: str):
@@ -484,11 +552,16 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         # Detach the agent's memory path first so a partially-failed delete
         # never leaves the agent indexing an unmanaged directory.
         try:
-            request.app.state.openclaw.remove_agent_path(kb["agent_id"], Path(kb["path"]))
+            changed = _detach_path(request.app.state.openclaw, kb, Path(kb["path"]))
         except OpenClawError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         request.app.state.db.execute("DELETE FROM knowledge_bases WHERE id = ?", (knowledge_base_id,))
-        return {"ok": True, "physicalDirectoryPreserved": True}
+        return {
+            "ok": True,
+            "physicalDirectoryPreserved": True,
+            "configChanged": changed,
+            "scope": "public" if _is_public(kb) else "agent",
+        }
 
     @app.get("/api/knowledge-bases/{knowledge_base_id}/documents")
     def list_documents(request: Request, knowledge_base_id: str):

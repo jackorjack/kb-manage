@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -19,7 +19,10 @@ class PasswordChangeRequest(BaseModel):
 
 class KnowledgeBaseCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    agentId: str = Field(min_length=1, max_length=256)
+    # "public": written to global memory.search.extraPaths, indexed by every agent.
+    # "agent": linked to one agent (agentId required).
+    scope: Literal["agent", "public"] = "agent"
+    agentId: Optional[str] = Field(default=None, max_length=256)
     path: Optional[str] = Field(default=None, min_length=1, max_length=4096)
 
 

@@ -264,7 +264,9 @@ class OpenClawService:
         raw_paths, _ = self._effective_paths(agent, defaults, memory, roster)
         configured_paths = self._resolve_extra_paths(raw_paths, workspace)
         path = str(documents_path)
+        changed = False
         if path not in configured_paths:
+            changed = True
             if roster == "entries":
                 config_path = f"agents.entries.{agent_id}.memory.search.extraPaths"
                 write_paths = self._extra_paths(agent)
@@ -285,9 +287,10 @@ class OpenClawService:
             "agent_id": agent_id,
             "workspace": workspace,
             "path": str(documents_path),
+            "changed": changed,
         }
 
-    def remove_agent_path(self, agent_id: str, documents_path: Path, keep: Optional[Path] = None) -> None:
+    def remove_agent_path(self, agent_id: str, documents_path: Path, keep: Optional[Path] = None) -> bool:
         """Drop a knowledge-base directory from the agent's own extraPaths.
 
         Only touches paths the agent owns: entries rosters write
@@ -326,7 +329,7 @@ class OpenClawService:
             if _resolved(raw) != target or (keep_value is not None and _resolved(raw) == keep_value)
         ]
         if len(remaining) == len(write_paths):
-            return
+            return False
         self.run(
             [
                 "config",
@@ -336,9 +339,63 @@ class OpenClawService:
                 "--strict-json",
             ]
         )
+        return True
 
-    def index(self, agent_id: str, force: bool = False) -> CommandResult:
-        arguments = ["memory", "index", "--agent", agent_id]
+    def _global_extra_paths(self) -> List[str]:
+        # Read strictly: treating a failed read as "no paths" would make the
+        # write below drop existing global entries such as "wiki".
+        value = self._json_command(["config", "get", "memory", "--json"])
+        if not isinstance(value, dict):
+            raise OpenClawError("OpenClaw memory configuration has an unexpected format")
+        return self._extra_paths(value)
+
+    @staticmethod
+    def _same_absolute_path(raw: str, target: str) -> bool:
+        # Relative entries (e.g. "wiki") resolve per agent workspace, so they
+        # never identify a shared public directory and are never removed here.
+        path = Path(raw).expanduser()
+        return path.is_absolute() and str(path.resolve()) == target
+
+    def _set_global_paths(self, paths: List[str]) -> None:
+        self.run(
+            [
+                "config",
+                "set",
+                "memory.search.extraPaths",
+                json.dumps(paths, ensure_ascii=False),
+                "--strict-json",
+            ]
+        )
+
+    def configure_global_path(self, documents_path: Path) -> bool:
+        """Add a public knowledge base to global memory.search.extraPaths.
+
+        Global paths are combined with every agent's own paths, so all agents
+        (including ones added later) index the directory. Returns True when the
+        configuration changed.
+        """
+        target = str(Path(documents_path).resolve())
+        paths = self._global_extra_paths()
+        if any(self._same_absolute_path(raw, target) for raw in paths):
+            return False
+        self._set_global_paths([*paths, target])
+        return True
+
+    def remove_global_path(self, documents_path: Path) -> bool:
+        """Drop a public knowledge base from global memory.search.extraPaths."""
+        target = str(Path(documents_path).resolve())
+        paths = self._global_extra_paths()
+        remaining = [raw for raw in paths if not self._same_absolute_path(raw, target)]
+        if len(remaining) == len(paths):
+            return False
+        self._set_global_paths(remaining)
+        return True
+
+    def index(self, agent_id: Optional[str], force: bool = False) -> CommandResult:
+        """Run `memory index`; without an agent id OpenClaw indexes every agent."""
+        arguments = ["memory", "index"]
+        if agent_id:
+            arguments.extend(["--agent", agent_id])
         if force:
             arguments.append("--force")
         arguments.append("--verbose")

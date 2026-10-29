@@ -223,7 +223,9 @@ function ConfirmDialog({ title, subject, description, note, confirmLabel, busy, 
 
 function CreateKbModal({ onClose, onCreated }) {
   const [name, setName] = useState("");
+  const [scope, setScope] = useState("agent");
   const [agents, setAgents] = useState([]);
+  const [publicDefaultPath, setPublicDefaultPath] = useState("");
   const [agentId, setAgentId] = useState("");
   const [path, setPath] = useState("");
   const [error, setError] = useState("");
@@ -236,10 +238,11 @@ function CreateKbModal({ onClose, onCreated }) {
       .then((result) => {
         if (!active) return;
         setAgents(result.items);
+        setPublicDefaultPath(result.publicDefaultPath || "");
         const first = result.items.find((agent) => !agent.used);
         if (first) {
           setAgentId(first.id);
-          if (first.extraPaths?.length === 1) setPath(first.extraPaths[0]);
+          setPath(first.defaultPath || "");
         }
       })
       .catch((err) => active && setError(err.message))
@@ -247,27 +250,33 @@ function CreateKbModal({ onClose, onCreated }) {
     return () => { active = false; };
   }, []);
 
+  const isPublic = scope === "public";
   const selectedAgent = agents.find((agent) => agent.id === agentId);
   const availableAgents = agents.filter((agent) => !agent.used);
   const configuredPaths = selectedAgent?.extraPaths || [];
+
+  function selectScope(event) {
+    const nextScope = event.target.value;
+    setScope(nextScope);
+    setError("");
+    setPath(nextScope === "public" ? publicDefaultPath : selectedAgent?.defaultPath || "");
+  }
 
   function selectAgent(event) {
     const nextId = event.target.value;
     const nextAgent = agents.find((agent) => agent.id === nextId);
     setAgentId(nextId);
-    setPath(nextAgent?.extraPaths?.length === 1 ? nextAgent.extraPaths[0] : "");
+    setPath(nextAgent?.defaultPath || "");
   }
 
   async function submit(event) {
     event.preventDefault();
-    if (!agentId || selectedAgent?.used) return setError("请选择一个未关联知识库的 OpenClaw Agent");
+    if (!isPublic && (!agentId || selectedAgent?.used)) return setError("请选择一个未关联知识库的 OpenClaw Agent");
     setBusy(true);
     setError("");
     try {
-      const result = await api("/api/knowledge-bases", {
-        method: "POST",
-        body: JSON.stringify({ name, agentId, path: path || undefined }),
-      });
+      const body = isPublic ? { name, scope, path: path || undefined } : { name, scope, agentId, path: path || undefined };
+      const result = await api("/api/knowledge-bases", { method: "POST", body: JSON.stringify(body) });
       onCreated(result);
       onClose();
     } catch (err) {
@@ -277,30 +286,36 @@ function CreateKbModal({ onClose, onCreated }) {
     }
   }
 
+  const canSubmit = !busy && !agentsLoading && (isPublic || (agentId && !selectedAgent?.used));
+
   return (
     <Modal title="新建知识库" onClose={onClose}>
       <form className="modal-form" onSubmit={submit}>
         <label>知识库名称<input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：产品文档" /></label>
-        <label>关联 Agent
-          <select value={agentId} onChange={selectAgent} disabled={agentsLoading || !agents.length}>
-            <option value="">{agentsLoading ? "正在读取 Agent..." : "选择已有 Agent"}</option>
-            {agents.map((agent) => <option key={agent.id} value={agent.id} disabled={agent.used}>{agent.name} · {agent.id}{agent.used ? "（已关联）" : ""}</option>)}
+        <label>知识库类型
+          <select value={scope} onChange={selectScope}>
+            <option value="agent">Agent 专属库（只有关联的 Agent 能检索）</option>
+            <option value="public">公共库（所有 Agent 都能检索）</option>
           </select>
         </label>
-        <label>知识库目录
-          {configuredPaths.length > 1 ? (
-            <select value={path} onChange={(event) => setPath(event.target.value)}>
-              <option value="">选择 Agent 的记忆目录</option>
-              {configuredPaths.map((configuredPath) => <option key={configuredPath} value={configuredPath}>{configuredPath}</option>)}
+        {!isPublic && (
+          <label>关联 Agent
+            <select value={agentId} onChange={selectAgent} disabled={agentsLoading || !agents.length}>
+              <option value="">{agentsLoading ? "正在读取 Agent..." : "选择已有 Agent"}</option>
+              {agents.map((agent) => <option key={agent.id} value={agent.id} disabled={agent.used}>{agent.name} · {agent.id}{agent.used ? "（已关联）" : ""}</option>)}
             </select>
-          ) : (
-            <input value={path} readOnly={configuredPaths.length === 1} onChange={(event) => setPath(event.target.value)} placeholder="/srv/openclaw/knowledge/products" />
-          )}
+          </label>
+        )}
+        <label>知识库目录
+          <input value={path} list={!isPublic && configuredPaths.length ? "kb-path-options" : undefined} onChange={(event) => setPath(event.target.value)} placeholder={isPublic ? publicDefaultPath : "/srv/openclaw/knowledge/products"} />
+          {!isPublic && configuredPaths.length > 0 && <datalist id="kb-path-options">{configuredPaths.map((configuredPath) => <option key={configuredPath} value={configuredPath} />)}</datalist>}
         </label>
-        <p className="field-hint">{selectedAgent?.pathSource === "default" ? "该 Agent 未单独配置记忆目录，当前使用 OpenClaw 全局默认目录。" : "已有 Agent 只有一个记忆目录时会自动使用；没有目录时请填写服务器上的绝对路径。"} 管理后台不会自动创建 Agent。</p>
-        {!agentsLoading && !availableAgents.length && <p className="field-hint">没有可关联的 Agent，请先在 OpenClaw 中创建未关联的 Agent。</p>}
+        <p className="field-hint">{isPublic
+          ? "公共库写入 OpenClaw 全局检索路径，所有 Agent（包括以后新增的）都会索引。价格底线、销售话术等专属内容不要放进公共库。"
+          : "默认使用该 Agent 工作区下的 wiki 目录，也可以填写服务器上的其他绝对路径。"} 管理后台不会自动创建 Agent。</p>
+        {!isPublic && !agentsLoading && !availableAgents.length && <p className="field-hint">没有可关联的 Agent，请先在 OpenClaw 中创建未关联的 Agent。</p>}
         <ErrorNotice message={error} />
-        <div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy || agentsLoading || !agentId || selectedAgent?.used}>{busy ? <LoaderCircle className="spin" size={16} /> : <Plus size={16} />}{busy ? "正在配置" : "创建知识库"}</button></div>
+        <div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!canSubmit}>{busy ? <LoaderCircle className="spin" size={16} /> : <Plus size={16} />}{busy ? "正在配置" : "创建知识库"}</button></div>
       </form>
     </Modal>
   );
@@ -464,7 +479,7 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob
           <div>
             <p className="eyebrow">KNOWLEDGE BASE / {kb.slug}</p>
             <h1>{kb.name}</h1>
-            <div className="path-line"><FolderOpen size={14} />{kb.path}<span className="separator">·</span>{kb.agentId}</div>
+            <div className="path-line"><FolderOpen size={14} />{kb.path}<span className="separator">·</span>{kb.scope === "public" ? "公共库 · 全部 Agent" : kb.agentId}</div>
           </div>
           <div className="header-actions">
             <button className="ghost-button task-button" disabled={!kb.latestJob} onClick={() => onShowJob(kb.activeJob || kb.latestJob)}><Clock3 size={16} />最近任务</button>
@@ -479,7 +494,7 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob
           <div className="metric"><span>文档数量</span><strong>{documents.length.toString().padStart(2, "0")}</strong><small>Markdown files</small></div>
           <div className="metric"><span>当前状态</span><strong className="metric-status"><StatusPill status={kb.latestJob?.status} phase={kb.latestJob?.phase} /></strong><small>{kb.latestJob ? formatTime(kb.latestJob.finishedAt || kb.latestJob.createdAt) : "尚未执行索引"}</small></div>
           <div className="metric"><span>存储目录</span><strong><HardDrive size={20} /></strong><small>external directory</small></div>
-          <div className="metric accent"><span>检索 agent</span><strong>{kb.agentId.replace("kb-", "")}</strong><small>isolated memory scope</small></div>
+          <div className="metric accent"><span>检索 agent</span><strong>{kb.scope === "public" ? "全部" : kb.agentId.replace("kb-", "")}</strong><small>{kb.scope === "public" ? "global memory scope" : "isolated memory scope"}</small></div>
         </section>
         <section className="documents-section">
           <div className="section-heading">
@@ -491,7 +506,7 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob
                 {query && <button className="doc-search-clear" title="清除筛选" onClick={() => setQuery("")}><X size={14} /></button>}
               </div>
               <button className="icon-button" title="刷新文件列表" onClick={loadDocuments}><RefreshCw size={16} /></button>
-              <button className="force-button" disabled={busy} onClick={() => onIndex(true)}><Zap size={15} />强制同步</button>
+              <button className="force-button" disabled={busy} title={kb.scope === "public" ? "对所有 Agent 强制重建索引" : `对 ${kb.agentId} 强制重建索引`} onClick={() => onIndex(true)}><Zap size={15} />强制同步</button>
             </div>
           </div>
           <div className="table-wrap">
@@ -545,6 +560,7 @@ function App() {
   const [showSystem, setShowSystem] = useState(false);
   const [job, setJob] = useState(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [deleteKbTarget, setDeleteKbTarget] = useState(null);
   const [deleteKbBusy, setDeleteKbBusy] = useState(false);
   const [deleteKbError, setDeleteKbError] = useState("");
@@ -613,6 +629,7 @@ function App() {
   function created(kb) {
     setShowCreate(false);
     loadKbs(kb.id);
+    if (kb.configChanged) setNotice("检索路径已变更：请在合适的时间重启 OpenClaw Gateway，然后在该知识库点「强制同步」重建索引。");
   }
 
   function newJob(result) {
@@ -625,12 +642,17 @@ function App() {
     setDeleteKbBusy(true);
     setDeleteKbError("");
     try {
-      await api(`/api/knowledge-bases/${deleteKbTarget.id}`, { method: "DELETE" });
+      const result = await api(`/api/knowledge-bases/${deleteKbTarget.id}`, { method: "DELETE" });
       setItems((currentItems) => currentItems.filter((item) => item.id !== deleteKbTarget.id));
       setSelected((currentSelected) => currentSelected?.id === deleteKbTarget.id ? null : currentSelected);
       setJob(null);
       setDeleteKbTarget(null);
       setError("");
+      if (result?.configChanged) {
+        setNotice(result.scope === "public"
+          ? "公共库已从全局检索路径移除：请重启 OpenClaw Gateway，然后在服务器执行 openclaw memory index --force，清理所有 Agent 索引里的旧内容。"
+          : `已从 Agent 检索路径移除：请重启 OpenClaw Gateway，然后执行 openclaw memory index --force --agent ${deleteKbTarget.agentId}。`);
+      }
     } catch (err) {
       setDeleteKbError(err.message);
     } finally {
@@ -647,6 +669,7 @@ function App() {
       <div className="main-stage">
         <div className="topline"><span><Activity size={14} /> CONTROL ROOM / LOCAL</span><span>{new Date().toLocaleDateString("zh-CN", { weekday: "long", month: "long", day: "numeric" })}</span></div>
         {error && <div className="stage-error"><ErrorNotice message={error} onClose={() => setError("")} /></div>}
+        {notice && <div className="stage-error"><ErrorNotice message={notice} onClose={() => setNotice("")} /></div>}
         {showSystem ? (
           <SystemPanel onClose={() => setShowSystem(false)} />
         ) : current ? (
@@ -669,7 +692,7 @@ function App() {
           title="删除知识库？"
           subject={deleteKbTarget.name}
           description="此知识库的管理记录、文档清单和任务记录将被移除。"
-          note={`服务器目录 ${deleteKbTarget.path} 及其中的文件会保留。`}
+          note={deleteKbTarget.scope === "public" ? `服务器目录 ${deleteKbTarget.path} 及其中的文件会保留；公共库会从全局检索路径移除，所有 Agent 不再索引该目录。` : `服务器目录 ${deleteKbTarget.path} 及其中的文件会保留。`}
           confirmLabel="删除知识库"
           busy={deleteKbBusy}
           error={deleteKbError}

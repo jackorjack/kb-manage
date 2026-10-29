@@ -60,7 +60,11 @@ elif args[:4] == ["config", "get", "memory", "--json"]:
 elif args[:2] == ["config", "set"]:
     current_match = re.fullmatch(r"agents\.entries\.(.+)\.memory\.search\.extraPaths", args[2])
     legacy_match = re.fullmatch(r"agents\.list\[(\d+)\]\.memorySearch\.extraPaths", args[2])
-    if current_match:
+    if args[2] == "memory.search.extraPaths":
+        config = state.setdefault("config", {})
+        memory = config.setdefault("memory", dict(state.get("memory", {})))
+        memory.setdefault("search", {})["extraPaths"] = json.loads(args[3])
+    elif current_match:
         agent_id = current_match.group(1)
         config = state.setdefault("config", {})
         entries = config.setdefault("agents", {}).setdefault("entries", {})

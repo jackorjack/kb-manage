@@ -49,6 +49,8 @@ def make_client(tmp_path, monkeypatch, state=None):
             "ADMIN_INITIAL_PASSWORD": "correct-horse-battery",
             "OPENCLAW_BIN": str(FIXTURE),
             "APP_START_WORKER": "true",
+            # Keep the default public directory inside the test sandbox.
+            "PUBLIC_KB_PATH": str(tmp_path / "kb" / "public"),
         }
     )
     return TestClient(create_app(settings)), state_path
@@ -231,6 +233,7 @@ def test_current_entries_and_memory_search_are_read_and_written(tmp_path, monkey
                 "name": "Main",
                 "workspace": str(workspace),
                 "extraPaths": [str(workspace / "global-docs"), str(workspace / "agent-docs")],
+                "defaultPath": str(workspace / "wiki"),
                 "pathSource": "agent",
                 "used": False,
             }
@@ -384,3 +387,158 @@ def test_admin_can_change_password(tmp_path, monkeypatch):
             "/api/auth/login",
             json={"username": "admin", "password": "new-secure-password"},
         ).status_code == 200
+
+
+def entries_state(tmp_path):
+    main_ws = tmp_path / "main-ws"
+    sales_ws = tmp_path / "sales-ws"
+    main_ws.mkdir()
+    sales_ws.mkdir()
+    state = {
+        "config": {
+            "agents": {
+                "defaults": {},
+                "entries": {
+                    "main": {"name": "Main", "workspace": str(main_ws)},
+                    "sales": {"name": "Sales", "workspace": str(sales_ws)},
+                },
+            },
+            "memory": {"search": {"extraPaths": ["wiki"]}},
+        },
+        "commands": [],
+    }
+    return state, main_ws, sales_ws
+
+
+def test_public_knowledge_base_uses_global_paths_and_indexes_all_agents(tmp_path, monkeypatch):
+    state, main_ws, sales_ws = entries_state(tmp_path)
+    client, state_path = make_client(tmp_path, monkeypatch, state)
+    public_path = tmp_path / "kb" / "public"
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        agents = client.get("/api/openclaw/agents")
+        assert agents.status_code == 200
+        assert agents.json()["publicDefaultPath"] == str(public_path)
+
+        created = client.post(
+            "/api/knowledge-bases",
+            json={"name": "公共库", "scope": "public"},
+            headers=headers,
+        )
+        assert created.status_code == 200, created.text
+        kb = created.json()
+        assert kb["scope"] == "public"
+        assert kb["agentId"] is None
+        assert kb["path"] == str(public_path)
+        assert kb["configChanged"] is True
+        saved = json.loads(state_path.read_text())
+        assert saved["config"]["memory"]["search"]["extraPaths"] == ["wiki", str(public_path)]
+
+        # Public directories are not offered as agent candidates.
+        items = {item["id"]: item for item in client.get("/api/openclaw/agents").json()["items"]}
+        assert items["main"]["extraPaths"] == [str(main_ws / "wiki")]
+        assert items["main"]["defaultPath"] == str(main_ws / "wiki")
+        assert items["sales"]["used"] is False
+
+        upload = client.post(
+            f"/api/knowledge-bases/{kb['id']}/documents",
+            files=[("files", ("faq.md", b"# FAQ", "text/markdown"))],
+            headers=headers,
+        )
+        assert upload.status_code == 200, upload.text
+        assert wait_for_job(client, upload.json()["id"])["status"] == "succeeded"
+        forced = client.post(f"/api/knowledge-bases/{kb['id']}/index", json={"force": True}, headers=headers)
+        assert forced.status_code == 200, forced.text
+        assert wait_for_job(client, forced.json()["id"])["status"] == "succeeded"
+
+        deleted = client.delete(f"/api/knowledge-bases/{kb['id']}", headers=headers)
+        assert deleted.status_code == 200, deleted.text
+        assert deleted.json()["configChanged"] is True
+        assert deleted.json()["scope"] == "public"
+
+    saved = json.loads(state_path.read_text())
+    index_commands = [command for command in saved["commands"] if command[:2] == ["memory", "index"]]
+    # Without --agent, OpenClaw indexes every agent in agents.entries.
+    assert index_commands == [
+        ["memory", "index", "--verbose"],
+        ["memory", "index", "--force", "--verbose"],
+    ]
+    assert saved["config"]["memory"]["search"]["extraPaths"] == ["wiki"]
+    assert (public_path / "faq.md").is_file()
+
+
+def test_agent_knowledge_base_defaults_to_workspace_wiki(tmp_path, monkeypatch):
+    state, main_ws, sales_ws = entries_state(tmp_path)
+    client, state_path = make_client(tmp_path, monkeypatch, state)
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        (tmp_path / "kb").mkdir()
+        public = client.post(
+            "/api/knowledge-bases",
+            json={"name": "公共库", "scope": "public", "path": str(tmp_path / "kb" / "public")},
+            headers=headers,
+        )
+        assert public.status_code == 200, public.text
+
+        created = client.post(
+            "/api/knowledge-bases",
+            json={"name": "销冠专属", "agentId": "sales"},
+            headers=headers,
+        )
+        assert created.status_code == 200, created.text
+        kb = created.json()
+        assert kb["scope"] == "agent"
+        assert kb["agentId"] == "sales"
+        assert kb["path"] == str(sales_ws / "wiki")
+        # The global relative "wiki" entry already covers <workspace>/wiki.
+        assert kb["configChanged"] is False
+
+        missing_agent = client.post(
+            "/api/knowledge-bases",
+            json={"name": "缺少 Agent", "path": str(tmp_path / "other")},
+            headers=headers,
+        )
+        assert missing_agent.status_code == 400
+
+    saved = json.loads(state_path.read_text())
+    set_targets = [command[2] for command in saved["commands"] if command[:2] == ["config", "set"]]
+    assert set_targets == ["memory.search.extraPaths"]
+
+
+def test_legacy_database_gains_scope_column(tmp_path):
+    import sqlite3
+
+    from backend.db import Database
+
+    db_path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """
+        CREATE TABLE knowledge_bases (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            slug TEXT NOT NULL UNIQUE,
+            path TEXT NOT NULL UNIQUE,
+            agent_id TEXT NOT NULL UNIQUE,
+            agent_workspace TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'provisioning',
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO knowledge_bases VALUES ('kb1', 'Old', 'old', '/srv/old', 'main', '/ws', 'ready', NULL, 't', 't')"
+    )
+    connection.commit()
+    connection.close()
+
+    database = Database(db_path)
+    database.initialize()
+    database.initialize()  # idempotent
+    row = database.fetchone("SELECT scope FROM knowledge_bases WHERE id = 'kb1'")
+    assert row["scope"] == "agent"
+    database.close()

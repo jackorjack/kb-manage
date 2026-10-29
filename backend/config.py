@@ -59,6 +59,7 @@ class Settings:
     frontend_dist: Path
     frontend_origin: str
     cookie_secure: bool
+    public_kb_path: Path
 
     @property
     def database_path(self) -> Path:
@@ -107,5 +108,10 @@ class Settings:
             cookie_secure=_bool(
                 env.get("APP_COOKIE_SECURE"),
                 env.get("APP_ENV", "development") == "production",
+            ),
+            # Default directory offered for public knowledge bases.
+            public_kb_path=_path(
+                os.path.expanduser(env.get("PUBLIC_KB_PATH") or ""),
+                Path.home() / ".openclaw" / "kb" / "public",
             ),
         )

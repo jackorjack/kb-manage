@@ -230,7 +230,7 @@ class JobWorker:
                     ),
                 )
         self._set_phase(row["id"], "indexing", payload)
-        result = self._run_index(knowledge_base["agent_id"], row["mode"] == "force")
+        result = self._run_index(self._index_target(knowledge_base), row["mode"] == "force")
         self._append_output(row["id"], result.stdout, result.stderr, result.returncode)
 
     def process_delete(self, row, payload: Dict[str, Any]) -> None:
@@ -249,16 +249,24 @@ class JobWorker:
                     (knowledge_base["id"], name),
                 )
         self._set_phase(row["id"], "indexing")
-        result = self._run_index(knowledge_base["agent_id"], False)
+        result = self._run_index(self._index_target(knowledge_base), False)
         self._append_output(row["id"], result.stdout, result.stderr, result.returncode)
 
     def process_index(self, row, payload: Dict[str, Any]) -> None:
         knowledge_base = self._knowledge_base(row["knowledge_base_id"])
         self._set_phase(row["id"], "indexing")
-        result = self._run_index(knowledge_base["agent_id"], row["mode"] == "force")
+        result = self._run_index(self._index_target(knowledge_base), row["mode"] == "force")
         self._append_output(row["id"], result.stdout, result.stderr, result.returncode)
 
-    def _run_index(self, agent_id: str, force: bool):
+    @staticmethod
+    def _index_target(knowledge_base) -> Optional[str]:
+        # Public knowledge bases live in global memory.search.extraPaths, so
+        # every agent indexes them: run `memory index` without --agent.
+        if knowledge_base["scope"] == "public":
+            return None
+        return knowledge_base["agent_id"]
+
+    def _run_index(self, agent_id: Optional[str], force: bool):
         with self.index_lock():
             return self.openclaw.index(agent_id, force=force)
 

@@ -124,3 +124,12 @@ the same nginx server:
 
    Visiting `http://<host>/kb-manage/` now loads the UI, and its API calls land
    on `http://<host>/kb-manage/api/...`.
+
+## Public knowledge bases
+
+A knowledge base can be created with scope **public** instead of being linked to one agent:
+
+- Its directory (default `~/.openclaw/kb/public`, override with `PUBLIC_KB_PATH`) is appended to the global `memory.search.extraPaths`, so every agent in `agents.entries` (including agents added later) indexes it. Keep agent-specific material out of it.
+- Upload, delete and index jobs for a public knowledge base run `openclaw memory index` without `--agent`, which OpenClaw applies to every configured agent. Agent knowledge bases keep using `--agent <id>`.
+- Agent knowledge bases default to `<agent workspace>/wiki`; public directories are not offered as agent candidates.
+- Creating, remapping or deleting a knowledge base can change OpenClaw configuration (`configChanged` in the API response). Restart the Gateway, then run a forced index. The manager never restarts the Gateway itself.
