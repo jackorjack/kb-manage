@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
@@ -21,6 +21,7 @@ from .db import Database
 from .files import (
     FileValidationError,
     assert_paths_do_not_overlap,
+    assert_target_path,
     document_id,
     list_markdown_files,
     remove_staging_dir,
@@ -33,6 +34,7 @@ from .openclaw import OpenClawError, OpenClawService
 from .schemas import (
     IndexRequest,
     KnowledgeBaseCreate,
+    KnowledgeBaseReorder,
     KnowledgeBaseUpdate,
     LoginRequest,
     PasswordChangeRequest,
@@ -113,6 +115,7 @@ def _serialize_kb(row, db: Database, active=None) -> Dict[str, Any]:
         "status": row["status"],
         "error": row["error"],
         "documentCount": document_count,
+        "sortOrder": row["sort_order"],
         # isBusy is global on purpose: a single worker serializes every job, so
         # a running job anywhere should block writes on every knowledge base.
         "isBusy": bool(active),
@@ -346,7 +349,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def list_knowledge_bases(request: Request):
         _session(request)
         db: Database = request.app.state.db
-        rows = db.fetchall("SELECT * FROM knowledge_bases ORDER BY name COLLATE NOCASE")
+        rows = db.fetchall(
+            "SELECT * FROM knowledge_bases ORDER BY sort_order ASC, name COLLATE NOCASE ASC"
+        )
         active = get_active_job(db)
         return {"items": [_serialize_kb(row, db, active) for row in rows]}
 
@@ -378,6 +383,36 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             ],
             "publicDefaultPath": str(app_settings.public_kb_path),
         }
+
+    @app.get("/api/system/config")
+    def system_config(request: Request):
+        """Lightweight settings the UI needs before the (slower) agent list."""
+        _session(request)
+        return {"publicKbPath": str(app_settings.public_kb_path)}
+
+    @app.patch("/api/knowledge-bases/order")
+    def reorder_knowledge_bases(request: Request, body: KnowledgeBaseReorder):
+        _write_guard(request)
+        db: Database = request.app.state.db
+        existing = {
+            row["id"] for row in db.fetchall("SELECT id FROM knowledge_bases")
+        }
+        requested = [kb_id for kb_id in body.ids if kb_id in existing]
+        # Unknown ids are ignored; anything not listed keeps its relative order
+        # after the explicitly ordered ones.
+        leftover = [
+            row["id"]
+            for row in db.fetchall("SELECT id FROM knowledge_bases ORDER BY sort_order ASC, name COLLATE NOCASE ASC")
+            if row["id"] not in set(requested)
+        ]
+        ordered = [*requested, *leftover]
+        with db.transaction(immediate=True) as connection:
+            for position, kb_id in enumerate(ordered):
+                connection.execute(
+                    "UPDATE knowledge_bases SET sort_order = ? WHERE id = ?",
+                    (position, kb_id),
+                )
+        return {"ok": True, "order": ordered}
 
     @app.post("/api/knowledge-bases")
     def create_knowledge_base(request: Request, body: KnowledgeBaseCreate):
@@ -434,11 +469,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         agent_id = f"{PUBLIC_AGENT_PREFIX}{kb_id}" if public else agent["id"]
         slug = _unique_slug(db, body.name)
         now = utc_now()
+        next_order = (db.fetchone("SELECT MAX(sort_order) AS m FROM knowledge_bases")["m"] or 0) + 1
         try:
             db.execute(
                 """
-                INSERT INTO knowledge_bases(id, name, slug, path, agent_id, agent_workspace, scope, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'provisioning', ?, ?)
+                INSERT INTO knowledge_bases(id, name, slug, path, agent_id, agent_workspace, scope, sort_order, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'provisioning', ?, ?)
                 """,
                 (
                     kb_id,
@@ -448,6 +484,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     agent_id,
                     str(workspace),
                     "public" if public else "agent",
+                    next_order,
                     now,
                     now,
                 ),
@@ -574,6 +611,29 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 _serialize_document(row, Path(kb["path"]) / row["name"]) for row in rows
             ]
         }
+
+    @app.get("/api/knowledge-bases/{knowledge_base_id}/documents/{document_id_value}/download")
+    def download_document(request: Request, knowledge_base_id: str, document_id_value: str):
+        _session(request)
+        kb = _ready_kb(request, knowledge_base_id)
+        db: Database = request.app.state.db
+        row = db.fetchone(
+            "SELECT * FROM documents WHERE id = ? AND knowledge_base_id = ?",
+            (document_id_value, knowledge_base_id),
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="document not found")
+        try:
+            target = assert_target_path(Path(kb["path"]), row["name"])
+        except FileValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="document file is missing")
+        return FileResponse(
+            target,
+            media_type="text/markdown; charset=utf-8",
+            filename=row["name"],
+        )
 
     @app.post("/api/knowledge-bases/{knowledge_base_id}/documents")
     async def upload_documents(

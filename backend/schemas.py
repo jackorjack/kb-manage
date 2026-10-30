@@ -31,6 +31,10 @@ class KnowledgeBaseUpdate(BaseModel):
     path: Optional[str] = Field(default=None, min_length=1, max_length=4096)
 
 
+class KnowledgeBaseReorder(BaseModel):
+    ids: List[str] = Field(min_length=1, max_length=500)
+
+
 class IndexRequest(BaseModel):
     force: bool = False
 

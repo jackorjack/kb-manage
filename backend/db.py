@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
     agent_id TEXT NOT NULL UNIQUE,
     agent_workspace TEXT NOT NULL,
     scope TEXT NOT NULL DEFAULT 'agent',
+    sort_order INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'provisioning',
     error TEXT,
     created_at TEXT NOT NULL,
@@ -136,6 +137,11 @@ class Database:
                 # bases existed; existing rows keep their agent-scoped meaning.
                 connection.execute(
                     "ALTER TABLE knowledge_bases ADD COLUMN scope TEXT NOT NULL DEFAULT 'agent'"
+                )
+            if "sort_order" not in columns:
+                # Additive upgrade for databases created before manual ordering.
+                connection.execute(
+                    "ALTER TABLE knowledge_bases ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
                 )
 
     @contextmanager

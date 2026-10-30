@@ -9,11 +9,16 @@ import {
   ChevronRight,
   CircleHelp,
   Clock3,
+  Download,
   FileText,
   FolderOpen,
+  Globe,
+  GripVertical,
   HardDrive,
+  KeyRound,
   LoaderCircle,
   LogOut,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -231,18 +236,32 @@ function CreateKbModal({ onClose, onCreated }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [agentsLoading, setAgentsLoading] = useState(true);
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
 
   useEffect(() => {
     let active = true;
+    // Fetch the public default path on its own — the agent list is slower and
+    // must not hold back the public path placeholder/default value.
+    api("/api/system/config")
+      .then((result) => {
+        if (!active) return;
+        const value = result.publicKbPath || "";
+        setPublicDefaultPath(value);
+        setPath((current) =>
+          scopeRef.current === "public" && !current ? value : current
+        );
+      })
+      .catch(() => {});
     api("/api/openclaw/agents")
       .then((result) => {
         if (!active) return;
         setAgents(result.items);
-        setPublicDefaultPath(result.publicDefaultPath || "");
+        if (result.publicDefaultPath) setPublicDefaultPath(result.publicDefaultPath);
         const first = result.items.find((agent) => !agent.used);
         if (first) {
           setAgentId(first.id);
-          setPath(first.defaultPath || "");
+          setPath((current) => current || first.defaultPath || "");
         }
       })
       .catch((err) => active && setError(err.message))
@@ -321,6 +340,41 @@ function CreateKbModal({ onClose, onCreated }) {
   );
 }
 
+function RenameModal({ kb, onClose, onRenamed }) {
+  const [name, setName] = useState(kb.name);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event) {
+    event.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) return setError("名称不能为空");
+    if (trimmed === kb.name) return onClose();
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api(`/api/knowledge-bases/${kb.id}`, { method: "PATCH", body: JSON.stringify({ name: trimmed }) });
+      onRenamed(result);
+      onClose();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="重命名知识库" onClose={onClose}>
+      <form className="modal-form" onSubmit={submit}>
+        <label>知识库名称<input autoFocus value={name} onChange={(event) => setName(event.target.value)} maxLength={120} /></label>
+        <p className="field-hint">只改显示名称；目录路径和 OpenClaw 检索配置不受影响。</p>
+        <ErrorNotice message={error} />
+        <div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy || !name.trim()}>{busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}{busy ? "正在保存" : "保存"}</button></div>
+      </form>
+    </Modal>
+  );
+}
+
 function UploadModal({ kb, onClose, onUploaded }) {
   const inputRef = useRef(null);
   const [files, setFiles] = useState([]);
@@ -375,14 +429,43 @@ function UploadModal({ kb, onClose, onUploaded }) {
   );
 }
 
-function Sidebar({ items, selected, onSelect, onCreate, onLogout, systemOpen, onSystem }) {
+function Sidebar({ items, selected, onSelect, onCreate, onLogout, onReorder, onPassword, systemOpen, onSystem }) {
+  const dragId = useRef(null);
+  const [overId, setOverId] = useState(null);
+
+  function handleDrop(targetId) {
+    const from = dragId.current;
+    dragId.current = null;
+    setOverId(null);
+    if (!from || from === targetId) return;
+    const ids = items.map((item) => item.id);
+    const next = ids.filter((id) => id !== from);
+    next.splice(next.indexOf(targetId), 0, from);
+    onReorder(next);
+  }
+
   return (
     <aside className="sidebar">
       <div className="sidebar-brand"><div className="brand-icon"><BookOpen size={18} /></div><div><strong>KB / MANAGER</strong><span>memory control room</span></div></div>
       <div className="side-section-label">KNOWLEDGE BASES <span>{String(items.length).padStart(2, "0")}</span></div>
-      <nav className="kb-nav">{items.map((item) => <button key={item.id} className={`kb-nav-item ${selected?.id === item.id ? "active" : ""}`} onClick={() => onSelect(item)}><span className="nav-dot" /><span className="nav-name">{item.name}</span>{item.isBusy ? <LoaderCircle size={14} className="spin" /> : <ChevronRight size={14} />}</button>)}</nav>
+      <nav className="kb-nav">{items.map((item) => <button
+        key={item.id}
+        draggable
+        onDragStart={(event) => { dragId.current = item.id; event.dataTransfer.effectAllowed = "move"; }}
+        onDragOver={(event) => { event.preventDefault(); if (dragId.current !== item.id) setOverId(item.id); }}
+        onDragLeave={() => setOverId((current) => (current === item.id ? null : current))}
+        onDrop={(event) => { event.preventDefault(); handleDrop(item.id); }}
+        onDragEnd={() => { dragId.current = null; setOverId(null); }}
+        className={`kb-nav-item ${selected?.id === item.id ? "active" : ""} ${item.scope === "public" ? "public" : ""} ${overId === item.id ? "drop-target" : ""}`}
+        onClick={() => onSelect(item)}>
+          <GripVertical size={13} className="nav-grip" />
+          <span className="nav-dot" />
+          <span className="nav-name">{item.name}</span>
+          {item.scope === "public" && <span className="scope-badge">公共</span>}
+          {item.isBusy ? <LoaderCircle size={14} className="spin" /> : <ChevronRight size={14} />}
+        </button>)}</nav>
       <button className="new-kb-button" onClick={onCreate}><Plus size={16} /> 新建知识库</button>
-      <div className="sidebar-bottom"><button className={`side-action ${systemOpen ? "active" : ""}`} onClick={onSystem}><Settings size={16} /> 系统状态</button><div className="user-card"><div className="avatar">A</div><div><strong>Administrator</strong><span>local access</span></div><button className="icon-button subtle" title="退出登录" onClick={onLogout}><LogOut size={15} /></button></div></div>
+      <div className="sidebar-bottom"><button className={`side-action ${systemOpen ? "active" : ""}`} onClick={onSystem}><Settings size={16} /> 系统状态</button><div className="user-card"><div className="avatar">A</div><div><strong>Administrator</strong><span>local access</span></div><button className="icon-button subtle" title="修改密码" onClick={onPassword}><KeyRound size={15} /></button><button className="icon-button subtle" title="退出登录" onClick={onLogout}><LogOut size={15} /></button></div></div>
     </aside>
   );
 }
@@ -393,22 +476,63 @@ function EmptyState({ onCreate }) {
 
 function SystemPanel({ onClose }) {
   const [data, setData] = useState(null);
+  useEffect(() => {
+    api("/api/system/status").then(setData).catch(() => setData({ error: "无法读取系统状态" }));
+  }, []);
+  return (
+    <section className="system-panel">
+      <div className="section-heading">
+        <div><p className="eyebrow">RUNTIME CHECK</p><h2>系统状态</h2></div>
+        <button className="icon-button" title="关闭" onClick={onClose}><X size={18} /></button>
+      </div>
+      {data?.error ? <ErrorNotice message={data.error} /> : (
+        <div className="system-grid">
+          {[
+            ["OpenClaw", data?.openclaw?.ok, data?.openclaw?.version || data?.openclaw?.error],
+            ["MarkItDown", data?.markitdown?.ok, "in-process converter"],
+            ["SQLite", data?.database?.ok, data?.database?.path],
+            ["Worker", data?.worker?.running, data?.worker?.running ? "accepting jobs" : "stopped"],
+          ].map(([label, ok, detail]) => (
+            <div className="system-card" key={label}>
+              <div className={`system-icon ${ok ? "ok" : "bad"}`}>{ok ? <Check size={17} /> : <AlertTriangle size={17} />}</div>
+              <div><strong>{label}</strong><span title={detail}>{detail || "not available"}</span></div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PasswordModal({ onClose }) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
-  const [passwordMessage, setPasswordMessage] = useState("");
-  const [passwordError, setPasswordError] = useState("");
-  const [passwordBusy, setPasswordBusy] = useState(false);
-  useEffect(() => { api("/api/system/status").then(setData).catch(() => setData({ error: "无法读取系统状态" })); }, []);
-  async function updatePassword(event) {
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event) {
     event.preventDefault();
-    setPasswordBusy(true); setPasswordMessage(""); setPasswordError("");
+    setBusy(true); setMessage(""); setError("");
     try {
       await api("/api/auth/password", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) });
-      setCurrentPassword(""); setNewPassword(""); setPasswordMessage("密码已更新");
-    } catch (err) { setPasswordError(err.message); }
-    finally { setPasswordBusy(false); }
+      setCurrentPassword(""); setNewPassword(""); setMessage("密码已更新");
+    } catch (err) { setError(err.message); }
+    finally { setBusy(false); }
   }
-  return <section className="system-panel"><div className="section-heading"><div><p className="eyebrow">RUNTIME CHECK</p><h2>系统状态</h2></div><button className="icon-button" title="关闭" onClick={onClose}><X size={18} /></button></div>{data?.error ? <ErrorNotice message={data.error} /> : <div className="system-grid">{[["OpenClaw", data?.openclaw?.ok, data?.openclaw?.version || data?.openclaw?.error], ["MarkItDown", data?.markitdown?.ok, "in-process converter"], ["SQLite", data?.database?.ok, data?.database?.path], ["Worker", data?.worker?.running, data?.worker?.running ? "accepting jobs" : "stopped"]].map(([label, ok, detail]) => <div className="system-card" key={label}><div className={`system-icon ${ok ? "ok" : "bad"}`}>{ok ? <Check size={17} /> : <AlertTriangle size={17} />}</div><div><strong>{label}</strong><span>{detail || "not available"}</span></div></div>)}</div>}<form className="password-form" onSubmit={updatePassword}><div className="password-intro"><p className="eyebrow">ACCOUNT SECURITY</p><h3>修改管理员密码</h3><p className="password-hint">新密码至少 8 位，更新后当前会话保持登录。</p></div><div className="password-fields"><label>当前密码<input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} autoComplete="current-password" /></label><label>新密码<input type="password" minLength="8" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} autoComplete="new-password" /></label></div>{passwordError && <ErrorNotice message={passwordError} />}{passwordMessage && <div className="success-notice"><CheckCircle2 size={15} />{passwordMessage}</div>}<div className="password-actions"><button className="primary-button" disabled={passwordBusy}>{passwordBusy ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}{passwordBusy ? "正在更新" : "更新密码"}</button></div></form></section>;
+
+  return (
+    <Modal title="修改管理员密码" eyebrow="ACCOUNT SECURITY" onClose={onClose}>
+      <form className="modal-form" onSubmit={submit}>
+        <label>当前密码<input type="password" autoFocus value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} autoComplete="current-password" /></label>
+        <label>新密码<input type="password" minLength="8" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} autoComplete="new-password" /></label>
+        <p className="field-hint">新密码至少 8 位，更新后当前会话保持登录。</p>
+        {error && <ErrorNotice message={error} />}
+        {message && <div className="success-notice"><CheckCircle2 size={15} />{message}</div>}
+        <div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy || !currentPassword || newPassword.length < 8}>{busy ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}{busy ? "正在更新" : "更新密码"}</button></div>
+      </form>
+    </Modal>
+  );
 }
 
 function JobPanel({ job, onClose }) {
@@ -417,7 +541,7 @@ function JobPanel({ job, onClose }) {
   return <aside className="job-panel"><div className="job-panel-header"><div><p className="eyebrow">RUN DETAIL</p><h3>同步任务</h3></div><button className="icon-button" title="关闭任务详情" onClick={onClose}><X size={17} /></button></div><div className="job-summary"><StatusPill status={job.status} phase={job.phase} /><span>{job.mode === "force" ? "强制重建" : "自动同步"}</span></div><div className="job-timeline"><div className={job.phase === "converting" ? "current" : ""}><span>01</span><strong>转换文档</strong></div><div className={job.phase === "publishing" ? "current" : ""}><span>02</span><strong>写入目录</strong></div><div className={job.phase === "indexing" ? "current" : ""}><span>03</span><strong>执行索引</strong></div></div>{job.files?.length > 0 && <div className="job-files">{job.files.map((file) => <div key={file.source_name}><span>{file.source_name}</span><small className={file.status === "failed" ? "danger-text" : ""}>{file.status === "converted" ? "converted" : file.status}</small></div>)}</div>}{job.error && <div className="job-error"><AlertTriangle size={15} />{job.error}</div>}<div className="log-block"><div className="log-label">COMMAND OUTPUT</div><pre>{[job.stdout, job.stderr].filter(Boolean).join("\n") || "等待任务输出..."}</pre></div><div className="job-time">创建于 {formatTime(job.createdAt)}{job.finishedAt && ` · 完成于 ${formatTime(job.finishedAt)}`}</div></aside>;
 }
 
-function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob }) {
+function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, onRename, busy, onShowJob }) {
   const [documents, setDocuments] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -478,8 +602,14 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob
         <header className="workspace-header">
           <div>
             <p className="eyebrow">KNOWLEDGE BASE / {kb.slug}</p>
-            <h1>{kb.name}</h1>
-            <div className="path-line"><FolderOpen size={14} />{kb.path}<span className="separator">·</span>{kb.scope === "public" ? "公共库 · 全部 Agent" : kb.agentId}</div>
+            <h1 className="workspace-title">{kb.name}<button className="icon-button subtle" title="重命名知识库" onClick={onRename}><Pencil size={15} /></button></h1>
+            <div className="path-line">
+              <FolderOpen size={14} />
+              <span className="path-truncate" title={kb.path}>{kb.path}</span>
+              <span className={`path-chip ${kb.scope === "public" ? "public" : ""}`}>
+                {kb.scope === "public" ? <><Globe size={11} /> 公共库 · 全部 Agent</> : kb.agentId}
+              </span>
+            </div>
           </div>
           <div className="header-actions">
             <button className="ghost-button task-button" disabled={!kb.latestJob} onClick={() => onShowJob(kb.activeJob || kb.latestJob)}><Clock3 size={16} />最近任务</button>
@@ -493,8 +623,8 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob
         <section className="metric-row">
           <div className="metric"><span>文档数量</span><strong>{documents.length.toString().padStart(2, "0")}</strong><small>Markdown files</small></div>
           <div className="metric"><span>当前状态</span><strong className="metric-status"><StatusPill status={kb.latestJob?.status} phase={kb.latestJob?.phase} /></strong><small>{kb.latestJob ? formatTime(kb.latestJob.finishedAt || kb.latestJob.createdAt) : "尚未执行索引"}</small></div>
-          <div className="metric"><span>存储目录</span><strong><HardDrive size={20} /></strong><small>external directory</small></div>
-          <div className="metric accent"><span>检索 agent</span><strong>{kb.scope === "public" ? "全部" : kb.agentId.replace("kb-", "")}</strong><small>{kb.scope === "public" ? "global memory scope" : "isolated memory scope"}</small></div>
+          <div className="metric label"><span>存储目录</span><strong className="path-truncate" title={kb.path}><HardDrive size={13} className="meta-icon" style={{marginRight:6}} />{kb.path.split("/").filter(Boolean).slice(-1)[0] || kb.path}</strong><small>external directory</small></div>
+          <div className="metric label accent"><span>检索 agent</span><strong>{kb.scope === "public" ? "全部 Agent" : kb.agentId.replace("kb-", "")}</strong><small>{kb.scope === "public" ? "global memory scope" : "isolated memory scope"}</small></div>
         </section>
         <section className="documents-section">
           <div className="section-heading">
@@ -525,7 +655,12 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, busy, onShowJob
                     <td><span className="file-type">{document.sourceExt === ".docx" ? "DOCX → MD" : "MARKDOWN"}</span></td>
                     <td>{formatBytes(document.sizeBytes)}</td>
                     <td>{formatTime(document.modifiedAt)}</td>
-                    <td className="action-col"><button className="icon-button danger-icon" disabled={busy} title="删除文件" onClick={() => { setDeleteTarget(document); setDeleteError(""); }}><Trash2 size={16} /></button></td>
+                    <td className="action-col">
+                      <span className="row-actions">
+                        {document.exists !== false && <a className="icon-button" title="下载文件" href={apiUrl(`/api/knowledge-bases/${kb.id}/documents/${document.id}/download`)} download={document.name}><Download size={16} /></a>}
+                        <button className="icon-button danger-icon" disabled={busy} title="删除文件" onClick={() => { setDeleteTarget(document); setDeleteError(""); }}><Trash2 size={16} /></button>
+                      </span>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -557,6 +692,8 @@ function App() {
   const [selected, setSelected] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
+  const [showRename, setShowRename] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [showSystem, setShowSystem] = useState(false);
   const [job, setJob] = useState(null);
   const [error, setError] = useState("");
@@ -637,6 +774,22 @@ function App() {
     loadKbs(current?.id);
   }
 
+  async function reorder(ids) {
+    // Optimistic reorder; the 1.5s poll will re-sync from the server anyway.
+    const order = new Map(ids.map((id, index) => [id, index]));
+    setItems((currentItems) =>
+      [...currentItems].sort(
+        (a, b) => (order.get(a.id) ?? currentItems.length) - (order.get(b.id) ?? currentItems.length)
+      )
+    );
+    try {
+      await api("/api/knowledge-bases/order", { method: "PATCH", body: JSON.stringify({ ids }) });
+    } catch (err) {
+      setError(err.message);
+      loadKbs();
+    }
+  }
+
   async function removeKnowledgeBase() {
     if (!deleteKbTarget) return;
     setDeleteKbBusy(true);
@@ -665,7 +818,7 @@ function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar items={items} selected={current} onSelect={(item) => { setSelected(item); setShowSystem(false); }} onCreate={() => setShowCreate(true)} onLogout={logout} systemOpen={showSystem} onSystem={() => setShowSystem((value) => !value)} />
+      <Sidebar items={items} selected={current} onSelect={(item) => { setSelected(item); setShowSystem(false); }} onCreate={() => setShowCreate(true)} onLogout={logout} onReorder={reorder} onPassword={() => setShowPassword(true)} systemOpen={showSystem} onSystem={() => setShowSystem((value) => !value)} />
       <div className="main-stage">
         <div className="topline"><span><Activity size={14} /> CONTROL ROOM / LOCAL</span><span>{new Date().toLocaleDateString("zh-CN", { weekday: "long", month: "long", day: "numeric" })}</span></div>
         {error && <div className="stage-error"><ErrorNotice message={error} onClose={() => setError("")} /></div>}
@@ -678,6 +831,7 @@ function App() {
             busy={busy}
             onRefresh={() => loadKbs(current.id)}
             onUpload={() => setShowUpload(true)}
+            onRename={() => setShowRename(true)}
             onDelete={(kb) => { setDeleteKbTarget(kb); setDeleteKbError(""); }}
             onIndex={(force) => api(`/api/knowledge-bases/${current.id}/index`, { method: "POST", body: JSON.stringify({ force }) }).then(newJob).catch((err) => setError(err.message))}
             onShowJob={setJob}
@@ -687,6 +841,8 @@ function App() {
       {job && <JobPanel job={job} onClose={() => setJob(null)} />}
       {showCreate && <CreateKbModal onClose={() => setShowCreate(false)} onCreated={created} />}
       {showUpload && current && <UploadModal kb={current} onClose={() => setShowUpload(false)} onUploaded={newJob} />}
+      {showRename && current && <RenameModal kb={current} onClose={() => setShowRename(false)} onRenamed={(kb) => { loadKbs(kb.id); }} />}
+      {showPassword && <PasswordModal onClose={() => setShowPassword(false)} />}
       {deleteKbTarget && (
         <ConfirmDialog
           title="删除知识库？"
