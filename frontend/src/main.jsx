@@ -476,9 +476,11 @@ function EmptyState({ onCreate }) {
 
 function SystemPanel({ onClose }) {
   const [data, setData] = useState(null);
+  const [showConfig, setShowConfig] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
   useEffect(() => {
     api("/api/system/status").then(setData).catch(() => setData({ error: "无法读取系统状态" }));
-  }, []);
+  }, [refreshKey]);
   return (
     <section className="system-panel">
       <div className="section-heading">
@@ -486,21 +488,92 @@ function SystemPanel({ onClose }) {
         <button className="icon-button" title="关闭" onClick={onClose}><X size={18} /></button>
       </div>
       {data?.error ? <ErrorNotice message={data.error} /> : (
-        <div className="system-grid">
-          {[
-            ["OpenClaw", data?.openclaw?.ok, data?.openclaw?.version || data?.openclaw?.error],
-            ["MarkItDown", data?.markitdown?.ok, "in-process converter"],
-            ["SQLite", data?.database?.ok, data?.database?.path],
-            ["Worker", data?.worker?.running, data?.worker?.running ? "accepting jobs" : "stopped"],
-          ].map(([label, ok, detail]) => (
-            <div className="system-card" key={label}>
-              <div className={`system-icon ${ok ? "ok" : "bad"}`}>{ok ? <Check size={17} /> : <AlertTriangle size={17} />}</div>
-              <div><strong>{label}</strong><span title={detail}>{detail || "not available"}</span></div>
+        <>
+          <div className="system-grid">
+            {[
+              ["OpenClaw", data?.openclaw?.ok, data?.openclaw?.version || data?.openclaw?.error],
+              ["MarkItDown", data?.markitdown?.ok, "in-process converter"],
+              ["SQLite", data?.database?.ok, data?.database?.path],
+              ["Worker", data?.worker?.running, data?.worker?.running ? "accepting jobs" : "stopped"],
+            ].map(([label, ok, detail]) => (
+              <div className="system-card" key={label}>
+                <div className={`system-icon ${ok ? "ok" : "bad"}`}>{ok ? <Check size={17} /> : <AlertTriangle size={17} />}</div>
+                <div><strong>{label}</strong><span title={detail}>{detail || "not available"}</span></div>
+              </div>
+            ))}
+          </div>
+          <div className="refresher-card">
+            <div className={`system-icon ${data?.mtimeRefresher?.enabled ? "ok" : "bad"}`}><Clock3 size={17} /></div>
+            <div>
+              <strong>权重保鲜任务</strong>
+              <span>
+                {data?.mtimeRefresher?.enabled
+                  ? `每 ${Math.round((data?.mtimeRefresher?.intervalSeconds || 86400) / 3600)}h 刷新超过 ${data?.mtimeRefresher?.ageDays} 天未修改的文档，并自动执行增量索引`
+                  : "已停用"}
+                {data?.mtimeRefresher?.lastRunAt
+                  ? ` · 上次 ${formatTime(data.mtimeRefresher.lastRunAt)}，刷新了 ${data.mtimeRefresher.lastTouched} 个文件`
+                  : " · 尚未运行"}
+              </span>
             </div>
-          ))}
-        </div>
+            <button className="ghost-button" onClick={() => setShowConfig(true)}><Settings size={14} /> 配置</button>
+          </div>
+        </>
+      )}
+      {showConfig && (
+        <RefresherConfigModal
+          current={data?.mtimeRefresher}
+          onClose={() => setShowConfig(false)}
+          onSaved={() => { setShowConfig(false); setRefreshKey((k) => k + 1); }}
+        />
       )}
     </section>
+  );
+}
+
+function RefresherConfigModal({ current, onClose, onSaved }) {
+  const [enabled, setEnabled] = useState(current?.enabled !== false);
+  const [ageDays, setAgeDays] = useState(current?.ageDays ?? 30);
+  const [intervalHours, setIntervalHours] = useState(Math.round((current?.intervalSeconds ?? 86400) / 3600));
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event) {
+    event.preventDefault();
+    setBusy(true); setError("");
+    try {
+      await api("/api/system/config", {
+        method: "PATCH",
+        body: JSON.stringify({
+          refresherEnabled: enabled,
+          refresherAgeDays: Number(ageDays),
+          refresherIntervalSeconds: Number(intervalHours) * 3600,
+        }),
+      });
+      onSaved();
+    } catch (err) { setError(err.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <Modal title="权重保鲜任务" eyebrow="SCHEDULED TASK" onClose={onClose}>
+      <form className="modal-form" onSubmit={submit}>
+        <label className="toggle-label">
+          <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+          启用定时刷新
+        </label>
+        <label>超过多少天未修改的文件会被刷新（天）
+          <input type="number" min="1" max="3650" value={ageDays} onChange={(event) => setAgeDays(event.target.value)} />
+        </label>
+        <label>运行间隔（小时）
+          <input type="number" min="1" max="168" value={intervalHours} onChange={(event) => setIntervalHours(event.target.value)} />
+        </label>
+        <p className="field-hint">
+          每次运行会把超过指定天数未修改的 Markdown 文档的修改时间刷新为当前时间，并自动执行一次增量索引，让旧但权威的内容在检索里保持权重。配置保存后下个周期生效。
+        </p>
+        <ErrorNotice message={error} />
+        <div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy}>{busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}{busy ? "正在保存" : "保存配置"}</button></div>
+      </form>
+    </Modal>
   );
 }
 
@@ -641,19 +714,20 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, onRename, busy,
           </div>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>文件名称</th><th>类型</th><th>大小</th><th>更新时间</th><th className="action-col">操作</th></tr></thead>
+              <thead><tr><th>文件名称</th><th>类型</th><th>大小</th><th>上传时间</th><th>更新时间</th><th className="action-col">操作</th></tr></thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan="5" className="table-empty"><LoaderCircle className="spin" size={18} />正在读取目录</td></tr>
+                  <tr><td colSpan="6" className="table-empty"><LoaderCircle className="spin" size={18} />正在读取目录</td></tr>
                 ) : documents.length === 0 ? (
-                  <tr><td colSpan="5" className="table-empty"><FileText size={22} /><span>目录中还没有 Markdown 文档</span><button className="text-button" disabled={busy} onClick={onUpload}>导入第一批文档</button></td></tr>
+                  <tr><td colSpan="6" className="table-empty"><FileText size={22} /><span>目录中还没有 Markdown 文档</span><button className="text-button" disabled={busy} onClick={onUpload}>导入第一批文档</button></td></tr>
                 ) : filtered.length === 0 ? (
-                  <tr><td colSpan="5" className="table-empty"><Search size={22} /><span>没有匹配「{query}」的文档</span><button className="text-button" onClick={() => setQuery("")}>清除筛选</button></td></tr>
+                  <tr><td colSpan="6" className="table-empty"><Search size={22} /><span>没有匹配「{query}」的文档</span><button className="text-button" onClick={() => setQuery("")}>清除筛选</button></td></tr>
                 ) : filtered.map((document) => (
                   <tr key={document.id}>
                     <td><div className="file-name"><div className="file-icon"><FileText size={16} /></div><span>{document.name}</span></div></td>
                     <td><span className="file-type">{document.sourceExt === ".docx" ? "DOCX → MD" : "MARKDOWN"}</span></td>
                     <td>{formatBytes(document.sizeBytes)}</td>
+                    <td>{formatTime(document.createdAt)}</td>
                     <td>{formatTime(document.modifiedAt)}</td>
                     <td className="action-col">
                       <span className="row-actions">

@@ -31,6 +31,7 @@ from .files import (
 )
 from .jobs import JobError, JobWorker, create_job, get_active_job, get_job, update_job_payload
 from .openclaw import OpenClawError, OpenClawService
+from .refresher import MtimeRefresher
 from .schemas import (
     IndexRequest,
     KnowledgeBaseCreate,
@@ -38,6 +39,7 @@ from .schemas import (
     KnowledgeBaseUpdate,
     LoginRequest,
     PasswordChangeRequest,
+    SystemConfigUpdate,
 )
 from .security import hash_password, new_csrf_token, new_session_token, verify_password
 from .utils import json_loads, utc_now
@@ -88,6 +90,7 @@ def _serialize_document(row, path: Path) -> Dict[str, Any]:
         "sourceExt": row["source_ext"],
         "sizeBytes": stat.st_size if stat else row["size_bytes"],
         "modifiedAt": _modified_at(path) if exists else row["modified_at"],
+        "createdAt": row["created_at"],
         "sha256": row["sha256"],
         "exists": exists,
     }
@@ -266,13 +269,17 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         db.cleanup_sessions(utc_now())
         openclaw = OpenClawService(app_settings)
         worker = JobWorker(db, app_settings, openclaw)
+        refresher = MtimeRefresher(db, app_settings)
         app.state.settings = app_settings
         app.state.db = db
         app.state.openclaw = openclaw
         app.state.worker = worker
+        app.state.refresher = refresher
         if app_settings.app_start_worker:
             worker.start()
+        refresher.start()
         yield
+        refresher.stop()
         worker.stop()
 
     app = FastAPI(
@@ -388,7 +395,28 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def system_config(request: Request):
         """Lightweight settings the UI needs before the (slower) agent list."""
         _session(request)
-        return {"publicKbPath": str(app_settings.public_kb_path)}
+        refresher = request.app.state.refresher.status()
+        return {
+            "publicKbPath": str(app_settings.public_kb_path),
+            "refresher": {
+                "enabled": refresher["enabled"],
+                "ageDays": refresher["ageDays"],
+                "intervalSeconds": refresher["intervalSeconds"],
+                "defaults": refresher["defaults"],
+            },
+        }
+
+    @app.patch("/api/system/config")
+    def update_system_config(request: Request, body: SystemConfigUpdate):
+        _write_guard(request)
+        db: Database = request.app.state.db
+        if body.refresherEnabled is not None:
+            db.set_setting("refresher.enabled", "true" if body.refresherEnabled else "false")
+        if body.refresherAgeDays is not None:
+            db.set_setting("refresher.age_days", str(body.refresherAgeDays))
+        if body.refresherIntervalSeconds is not None:
+            db.set_setting("refresher.interval_seconds", str(body.refresherIntervalSeconds))
+        return {"ok": True, "refresher": request.app.state.refresher.status()}
 
     @app.patch("/api/knowledge-bases/order")
     def reorder_knowledge_bases(request: Request, body: KnowledgeBaseReorder):
@@ -761,6 +789,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             "worker": {
                 "running": bool(request.app.state.worker.thread and request.app.state.worker.thread.is_alive())
             },
+            "mtimeRefresher": request.app.state.refresher.status(),
         }
 
     if app_settings.frontend_dist.exists():

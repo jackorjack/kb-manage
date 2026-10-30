@@ -60,6 +60,9 @@ class Settings:
     frontend_origin: str
     cookie_secure: bool
     public_kb_path: Path
+    refresh_job_enabled: bool
+    refresh_job_age_days: int
+    refresh_job_interval_seconds: int
 
     @property
     def database_path(self) -> Path:
@@ -113,5 +116,13 @@ class Settings:
             public_kb_path=_path(
                 os.path.expanduser(env.get("PUBLIC_KB_PATH") or ""),
                 Path.home() / ".openclaw" / "kb" / "public",
+            ),
+            # Periodic mtime refresh keeps stale-but-authoritative content from
+            # losing retrieval weight. Only files untouched for
+            # refresh_job_age_days get their mtime bumped.
+            refresh_job_enabled=_bool(env.get("REFRESH_JOB_ENABLED"), True),
+            refresh_job_age_days=_int(env.get("REFRESH_JOB_AGE_DAYS"), 30),
+            refresh_job_interval_seconds=_int(
+                env.get("REFRESH_JOB_INTERVAL_SECONDS"), 86400
             ),
         )

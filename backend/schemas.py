@@ -39,6 +39,12 @@ class IndexRequest(BaseModel):
     force: bool = False
 
 
+class SystemConfigUpdate(BaseModel):
+    refresherEnabled: Optional[bool] = None
+    refresherAgeDays: Optional[int] = Field(default=None, ge=1, le=3650)
+    refresherIntervalSeconds: Optional[int] = Field(default=None, ge=60, le=7 * 86400)
+
+
 class UserResponse(BaseModel):
     username: str
 

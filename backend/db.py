@@ -79,6 +79,12 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_kb ON jobs(knowledge_base_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_documents_kb ON documents(knowledge_base_id, name);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -213,3 +219,16 @@ class Database:
 
     def cleanup_sessions(self, now: str) -> None:
         self.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+
+    def get_setting(self, key: str) -> Optional[str]:
+        row = self.fetchone("SELECT value FROM settings WHERE key = ?", (key,))
+        return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        self.execute(
+            """
+            INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, value, utc_now()),
+        )

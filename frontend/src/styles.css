@@ -256,6 +256,13 @@ tbody tr:hover { background: #f0eee7; }
 .system-card strong, .system-card span { display: block; }
 .system-card strong { color: var(--ink); font-size: 13px; }
 .system-card span { overflow: hidden; max-width: 310px; margin-top: 5px; color: var(--muted); font: 10px "DM Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.refresher-card { display: flex; align-items: center; gap: 13px; margin-top: 12px; padding: 16px 18px; background: var(--paper); border-top: 2px solid var(--teal); box-shadow: var(--shadow-soft); }
+.refresher-card strong, .refresher-card span { display: block; }
+.refresher-card strong { color: var(--ink); font-size: 13px; }
+.refresher-card span { margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.refresher-card .ghost-button { flex: 0 0 auto; margin-left: auto; min-height: 32px; font-size: 12px; }
+.toggle-label { display: flex !important; flex-direction: row !important; align-items: center; gap: 9px !important; cursor: pointer; }
+.toggle-label input[type="checkbox"] { width: 16px !important; min-height: 0 !important; height: 16px; padding: 0 !important; margin: 0; accent-color: var(--teal); }
 .success-notice { display: flex; align-items: center; gap: 7px; padding: 9px 11px; color: #276556; background: var(--teal-soft); font-size: 12px; }
 
 .modal-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(23, 32, 31, .52); backdrop-filter: blur(3px); animation: backdrop-in .2s ease; }

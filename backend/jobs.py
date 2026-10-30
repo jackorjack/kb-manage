@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import threading
 import time
 import traceback
@@ -20,6 +21,7 @@ from .files import (
     FileValidationError,
     assert_target_path,
     document_id,
+    list_markdown_files,
     normalize_markdown,
     publish_staged_outputs,
     remove_document_file,
@@ -230,7 +232,7 @@ class JobWorker:
                     ),
                 )
         self._set_phase(row["id"], "indexing", payload)
-        result = self._run_index(self._index_target(knowledge_base), row["mode"] == "force")
+        result = self._run_index(knowledge_base, self._index_target(knowledge_base), row["mode"] == "force")
         self._append_output(row["id"], result.stdout, result.stderr, result.returncode)
 
     def process_delete(self, row, payload: Dict[str, Any]) -> None:
@@ -249,13 +251,13 @@ class JobWorker:
                     (knowledge_base["id"], name),
                 )
         self._set_phase(row["id"], "indexing")
-        result = self._run_index(self._index_target(knowledge_base), False)
+        result = self._run_index(knowledge_base, self._index_target(knowledge_base), False)
         self._append_output(row["id"], result.stdout, result.stderr, result.returncode)
 
     def process_index(self, row, payload: Dict[str, Any]) -> None:
         knowledge_base = self._knowledge_base(row["knowledge_base_id"])
         self._set_phase(row["id"], "indexing")
-        result = self._run_index(self._index_target(knowledge_base), row["mode"] == "force")
+        result = self._run_index(knowledge_base, self._index_target(knowledge_base), row["mode"] == "force")
         self._append_output(row["id"], result.stdout, result.stderr, result.returncode)
 
     @staticmethod
@@ -266,9 +268,24 @@ class JobWorker:
             return None
         return knowledge_base["agent_id"]
 
-    def _run_index(self, agent_id: Optional[str], force: bool):
+    def _run_index(self, knowledge_base, agent_id: Optional[str], force: bool):
+        if force:
+            # OpenClaw's retrieval score decays with file age. Refreshing the
+            # mtime before a force reindex makes stable, long-lived content
+            # rank as fresh instead of sinking over time.
+            self._refresh_mtimes(Path(knowledge_base["path"]))
         with self.index_lock():
             return self.openclaw.index(agent_id, force=force)
+
+    @staticmethod
+    def _refresh_mtimes(knowledge_base_path: Path) -> None:
+        now = time.time()
+        for entry in list_markdown_files(knowledge_base_path):
+            try:
+                os.utime(entry, (now, now))
+            except OSError:
+                # A read-only or disappearing file must not fail the index.
+                continue
 
     @contextmanager
     def index_lock(self):
