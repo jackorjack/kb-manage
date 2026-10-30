@@ -416,10 +416,10 @@ function UploadModal({ kb, onClose, onUploaded }) {
     <Modal title="导入文档" onClose={onClose}>
       <form className="modal-form" onSubmit={submit}>
         <div className="dropzone" onClick={() => inputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
-          <input ref={inputRef} type="file" multiple accept=".docx,.md" onChange={choose} hidden />
+          <input ref={inputRef} type="file" multiple accept=".docx,.md,.xlsx,.csv" onChange={choose} hidden />
           <div className="drop-icon"><Upload size={21} /></div>
           <strong>拖入文件，或点击选择</strong>
-          <span>支持 DOCX / Markdown，可一次导入多个文件</span>
+          <span>支持 DOCX / Excel / CSV / Markdown，可一次导入多个文件</span>
         </div>
         {files.length > 0 && <div className="selected-files">{files.map((file) => <div className="selected-file" key={`${file.name}-${file.size}`}><FileText size={15} /><span>{file.name}</span><small>{formatBytes(file.size)}</small></div>)}</div>}
         <ErrorNotice message={error} />
@@ -725,7 +725,7 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, onRename, busy,
                 ) : filtered.map((document) => (
                   <tr key={document.id}>
                     <td><div className="file-name"><div className="file-icon"><FileText size={16} /></div><span>{document.name}</span></div></td>
-                    <td><span className="file-type">{document.sourceExt === ".docx" ? "DOCX → MD" : "MARKDOWN"}</span></td>
+                    <td><span className="file-type">{{".docx":"DOCX → MD",".xlsx":"EXCEL → MD",".csv":"CSV → MD"}[document.sourceExt] || "MARKDOWN"}</span></td>
                     <td>{formatBytes(document.sizeBytes)}</td>
                     <td>{formatTime(document.createdAt)}</td>
                     <td>{formatTime(document.modifiedAt)}</td>

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 
-ALLOWED_EXTENSIONS = {".md", ".docx"}
+ALLOWED_EXTENSIONS = {".md", ".docx", ".xlsx", ".csv"}
 
 
 class FileValidationError(ValueError):
@@ -60,7 +60,7 @@ def validate_upload_filename(raw_name: str) -> Tuple[str, str, str]:
         raise FileValidationError("invalid filename")
     extension = Path(name).suffix.lower()
     if extension not in ALLOWED_EXTENSIONS:
-        raise FileValidationError("only .docx and .md files are supported")
+        raise FileValidationError("only .docx, .xlsx, .csv and .md files are supported")
     stem = Path(name).stem.strip()
     if not stem or stem in {".", ".."}:
         raise FileValidationError("filename must have a name")
