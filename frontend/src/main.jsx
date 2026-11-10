@@ -27,6 +27,7 @@ import {
   Trash2,
   Upload,
   X,
+  Zap,
 } from "lucide-react";
 import "./styles.css";
 
@@ -85,6 +86,9 @@ function statusMeta(status, phase) {
       publishing: "写入中",
       deleting: "删除中",
       indexing: "索引中",
+      stopping_gateway: "停止服务中",
+      force_indexing: "强制索引中",
+      starting_gateway: "重启服务中",
     }[phase] || "处理中";
     return { label: phaseLabel, tone: "busy", icon: LoaderCircle };
   }
@@ -613,13 +617,16 @@ function JobPanel({ job, onClose }) {
   return <aside className="job-panel"><div className="job-panel-header"><div><p className="eyebrow">RUN DETAIL</p><h3>同步任务</h3></div><button className="icon-button" title="关闭任务详情" onClick={onClose}><X size={17} /></button></div><div className="job-summary"><StatusPill status={job.status} phase={job.phase} /><span>{job.mode === "force" ? "强制重建" : "自动同步"}</span></div><div className="job-timeline"><div className={job.phase === "converting" ? "current" : ""}><span>01</span><strong>转换文档</strong></div><div className={job.phase === "publishing" ? "current" : ""}><span>02</span><strong>写入目录</strong></div><div className={job.phase === "indexing" ? "current" : ""}><span>03</span><strong>执行索引</strong></div></div>{job.files?.length > 0 && <div className="job-files">{job.files.map((file) => <div key={file.source_name}><span>{file.source_name}</span><small className={file.status === "failed" ? "danger-text" : ""}>{file.status === "converted" ? "converted" : file.status}</small></div>)}</div>}{job.error && <div className="job-error"><AlertTriangle size={15} />{job.error}</div>}<div className="log-block"><div className="log-label">COMMAND OUTPUT</div><pre>{[job.stdout, job.stderr].filter(Boolean).join("\n") || "等待任务输出..."}</pre></div><div className="job-time">创建于 {formatTime(job.createdAt)}{job.finishedAt && ` · 完成于 ${formatTime(job.finishedAt)}`}</div></aside>;
 }
 
-function Workspace({ kb, onRefresh, onUpload, onDelete, onRename, busy, onShowJob }) {
+function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, onRename, busy, onShowJob }) {
   const [documents, setDocuments] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const [forceOpen, setForceOpen] = useState(false);
+  const [forceBusy, setForceBusy] = useState(false);
+  const [forceError, setForceError] = useState("");
   const [query, setQuery] = useState("");
   const completedJobId = ["succeeded", "failed"].includes(kb.latestJob?.status) ? kb.latestJob.id : "";
   const filtered = useMemo(() => {
@@ -645,6 +652,8 @@ function Workspace({ kb, onRefresh, onUpload, onDelete, onRename, busy, onShowJo
   useEffect(() => {
     setDeleteTarget(null);
     setDeleteError("");
+    setForceOpen(false);
+    setForceError("");
     setQuery("");
   }, [kb.id]);
 
@@ -665,6 +674,19 @@ function Workspace({ kb, onRefresh, onUpload, onDelete, onRename, busy, onShowJo
       setDeleteError(err.message);
     } finally {
       setDeleteBusy(false);
+    }
+  }
+
+  async function forceIndex() {
+    setForceBusy(true);
+    setForceError("");
+    try {
+      await onIndex(true);
+      setForceOpen(false);
+    } catch (err) {
+      setForceError(err.message);
+    } finally {
+      setForceBusy(false);
     }
   }
 
@@ -708,6 +730,7 @@ function Workspace({ kb, onRefresh, onUpload, onDelete, onRename, busy, onShowJo
                 {query && <button className="doc-search-clear" title="清除筛选" onClick={() => setQuery("")}><X size={14} /></button>}
               </div>
               <button className="icon-button" title="刷新文件列表" onClick={loadDocuments}><RefreshCw size={16} /></button>
+              <button className="force-button" disabled={busy} title={kb.scope === "public" ? "对所有 Agent 强制重建索引" : `对 ${kb.agentId} 强制重建索引`} onClick={() => { setForceError(""); setForceOpen(true); }}><Zap size={15} />强制同步</button>
             </div>
           </div>
           <div className="table-wrap">
@@ -752,6 +775,26 @@ function Workspace({ kb, onRefresh, onUpload, onDelete, onRename, busy, onShowJo
           onClose={() => { setDeleteTarget(null); setDeleteError(""); }}
           onConfirm={remove}
         />
+      )}
+      {forceOpen && (
+        <Modal title="强制同步？" eyebrow="GATEWAY RESTART" className="confirm-modal" closeDisabled={forceBusy} onClose={() => setForceOpen(false)}>
+          <div className="confirm-target">
+            <div className="confirm-icon"><Zap size={20} /></div>
+            <div><span>操作对象</span><strong>{kb.name}</strong></div>
+          </div>
+          <p className="confirm-description">
+            强制同步会先停掉智能体服务（OpenClaw Gateway），待同步完成后自动重启。整个过程通常需要几分钟，期间 Agent 无法响应消息。
+          </p>
+          <div className="confirm-note"><AlertTriangle size={16} /><span>同步失败时也会重启服务，避免 Agent 长时间离线。</span></div>
+          <ErrorNotice message={forceError} />
+          <div className="modal-actions">
+            <button type="button" className="ghost-button" disabled={forceBusy} onClick={() => setForceOpen(false)}>取消</button>
+            <button type="button" className="danger-button" disabled={forceBusy} onClick={forceIndex}>
+              {forceBusy ? <LoaderCircle className="spin" size={16} /> : <Zap size={16} />}
+              {forceBusy ? "正在提交" : "停服并强制同步"}
+            </button>
+          </div>
+        </Modal>
       )}
     </>
   );
@@ -905,6 +948,7 @@ function App() {
             onUpload={() => setShowUpload(true)}
             onRename={() => setShowRename(true)}
             onDelete={(kb) => { setDeleteKbTarget(kb); setDeleteKbError(""); }}
+            onIndex={(force) => api(`/api/knowledge-bases/${current.id}/index`, { method: "POST", body: JSON.stringify({ force }) }).then(newJob)}
             onShowJob={setJob}
           />
         ) : <EmptyState onCreate={() => setShowCreate(true)} />}

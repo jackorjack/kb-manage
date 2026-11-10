@@ -400,3 +400,14 @@ class OpenClawService:
             arguments.append("--force")
         arguments.append("--verbose")
         return self.run(arguments)
+
+    def gateway_stop(self) -> CommandResult:
+        """Stop the Gateway service.
+
+        --force only means "allow stop from a non-interactive shell"; the
+        manager runs under systemd/launchd and has no TTY.
+        """
+        return self.run(["gateway", "stop", "--force", "--json"], timeout=120)
+
+    def gateway_start(self) -> CommandResult:
+        return self.run(["gateway", "start", "--json"], timeout=180)

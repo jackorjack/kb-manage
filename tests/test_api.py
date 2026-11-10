@@ -542,3 +542,83 @@ def test_legacy_database_gains_scope_column(tmp_path):
     row = database.fetchone("SELECT scope FROM knowledge_bases WHERE id = 'kb1'")
     assert row["scope"] == "agent"
     database.close()
+
+
+def test_force_index_stops_gateway_before_indexing_and_restarts_after(tmp_path, monkeypatch):
+    client, state_path = make_client(tmp_path, monkeypatch)
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        created = client.post(
+            "/api/knowledge-bases",
+            json={"name": "Gateway 库", "agentId": "assistant", "path": str(tmp_path / "docs")},
+            headers=headers,
+        )
+        assert created.status_code == 200, created.text
+        kb = created.json()
+
+        forced = client.post(f"/api/knowledge-bases/{kb['id']}/index", json={"force": True}, headers=headers)
+        assert forced.status_code == 200, forced.text
+        assert wait_for_job(client, forced.json()["id"])["status"] == "succeeded"
+
+    saved = json.loads(state_path.read_text())
+    relevant = [
+        command
+        for command in saved["commands"]
+        if command[:2] in (["memory", "index"], ["gateway", "stop"], ["gateway", "start"])
+    ]
+    assert relevant == [
+        ["gateway", "stop", "--force", "--json"],
+        ["memory", "index", "--agent", "assistant", "--force", "--verbose"],
+        ["gateway", "start", "--json"],
+    ]
+    assert saved["gateway_running"] is True
+
+
+def test_force_index_restarts_gateway_when_index_fails(tmp_path, monkeypatch):
+    client, state_path = make_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("FAKE_INDEX_FAIL", "1")
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        created = client.post(
+            "/api/knowledge-bases",
+            json={"name": "失败库", "agentId": "assistant", "path": str(tmp_path / "docs")},
+            headers=headers,
+        )
+        assert created.status_code == 200, created.text
+        kb = created.json()
+
+        forced = client.post(f"/api/knowledge-bases/{kb['id']}/index", json={"force": True}, headers=headers)
+        assert forced.status_code == 200, forced.text
+        job = wait_for_job(client, forced.json()["id"])
+        assert job["status"] == "failed"
+
+    saved = json.loads(state_path.read_text())
+    assert [command[:2] for command in saved["commands"] if command[:2] in (["gateway", "stop"], ["gateway", "start"])] == [
+        ["gateway", "stop"],
+        ["gateway", "start"],
+    ]
+    assert saved["gateway_running"] is True
+
+
+def test_force_index_leaves_gateway_alone_when_stop_fails(tmp_path, monkeypatch):
+    client, state_path = make_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("FAKE_GATEWAY_STOP_FAIL", "1")
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        created = client.post(
+            "/api/knowledge-bases",
+            json={"name": "停服失败库", "agentId": "assistant", "path": str(tmp_path / "docs")},
+            headers=headers,
+        )
+        kb = created.json()
+
+        forced = client.post(f"/api/knowledge-bases/{kb['id']}/index", json={"force": True}, headers=headers)
+        assert forced.status_code == 200, forced.text
+        assert wait_for_job(client, forced.json()["id"])["status"] == "failed"
+
+    saved = json.loads(state_path.read_text())
+    assert not any(command[:2] == ["gateway", "start"] for command in saved["commands"])
+    assert not any(command[:2] == ["memory", "index"] for command in saved["commands"])

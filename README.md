@@ -78,6 +78,15 @@ command -v openclaw
 ./scripts/deploy.sh --restart
 ```
 
+## Forced index
+
+Current OpenClaw releases refuse `memory index --force` while the Gateway is
+running, so a forced index from the manager (`POST
+/api/knowledge-bases/{id}/index` with `force: true`) runs
+`openclaw gateway stop --force`, then `memory index --force`, then
+`openclaw gateway start`. The Gateway is started again even when indexing
+fails; if the stop itself fails the Gateway is left running and the job fails.
+
 ## Reverse proxy under a sub-path
 
 To serve the manager from `http://<host>/kb-manage/` alongside other apps on
@@ -132,4 +141,4 @@ A knowledge base can be created with scope **public** instead of being linked to
 - Its directory (default `~/.openclaw/kb/public`, override with `PUBLIC_KB_PATH`) is appended to the global `memory.search.extraPaths`, so every agent in `agents.entries` (including agents added later) indexes it. Keep agent-specific material out of it.
 - Upload, delete and index jobs for a public knowledge base run `openclaw memory index` without `--agent`, which OpenClaw applies to every configured agent. Agent knowledge bases keep using `--agent <id>`.
 - Agent knowledge bases default to `<agent workspace>/wiki`; public directories are not offered as agent candidates.
-- Creating, remapping or deleting a knowledge base can change OpenClaw configuration (`configChanged` in the API response). Restart the Gateway, then run a forced index. The manager never restarts the Gateway itself.
+- Creating, remapping or deleting a knowledge base can change OpenClaw configuration (`configChanged` in the API response). Restart the Gateway, then run a forced index. The manager only restarts the Gateway for a forced index (see below); it never restarts it for configuration changes.

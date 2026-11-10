@@ -28,7 +28,7 @@ from .files import (
     remove_staging_dir,
     sha256_file,
 )
-from .openclaw import OpenClawError, OpenClawService
+from .openclaw import CommandResult, OpenClawService
 from .utils import json_dumps, json_loads, utc_now
 
 
@@ -232,7 +232,7 @@ class JobWorker:
                     ),
                 )
         self._set_phase(row["id"], "indexing", payload)
-        result = self._run_index(knowledge_base, self._index_target(knowledge_base), row["mode"] == "force")
+        result = self._run_index(row["id"], knowledge_base, self._index_target(knowledge_base), row["mode"] == "force")
         self._append_output(row["id"], result.stdout, result.stderr, result.returncode)
 
     def process_delete(self, row, payload: Dict[str, Any]) -> None:
@@ -251,13 +251,13 @@ class JobWorker:
                     (knowledge_base["id"], name),
                 )
         self._set_phase(row["id"], "indexing")
-        result = self._run_index(knowledge_base, self._index_target(knowledge_base), False)
+        result = self._run_index(row["id"], knowledge_base, self._index_target(knowledge_base), False)
         self._append_output(row["id"], result.stdout, result.stderr, result.returncode)
 
     def process_index(self, row, payload: Dict[str, Any]) -> None:
         knowledge_base = self._knowledge_base(row["knowledge_base_id"])
         self._set_phase(row["id"], "indexing")
-        result = self._run_index(knowledge_base, self._index_target(knowledge_base), row["mode"] == "force")
+        result = self._run_index(row["id"], knowledge_base, self._index_target(knowledge_base), row["mode"] == "force")
         self._append_output(row["id"], result.stdout, result.stderr, result.returncode)
 
     @staticmethod
@@ -268,14 +268,35 @@ class JobWorker:
             return None
         return knowledge_base["agent_id"]
 
-    def _run_index(self, knowledge_base, agent_id: Optional[str], force: bool):
+    def _run_index(self, job_id: str, knowledge_base, agent_id: Optional[str], force: bool):
         if force:
             # OpenClaw's retrieval score decays with file age. Refreshing the
             # mtime before a force reindex makes stable, long-lived content
             # rank as fresh instead of sinking over time.
             self._refresh_mtimes(Path(knowledge_base["path"]))
+            # Current OpenClaw refuses --force while the Gateway is running.
+            return self._run_force_index_between_gateway_restarts(job_id, agent_id)
         with self.index_lock():
-            return self.openclaw.index(agent_id, force=force)
+            return self.openclaw.index(agent_id, force=False)
+
+    def _run_force_index_between_gateway_restarts(
+        self, job_id: str, agent_id: Optional[str]
+    ) -> CommandResult:
+        """Stop the Gateway, force-index, then always start it again.
+
+        If the stop itself fails the Gateway is left alone and the job fails.
+        Once it is down the restart runs even when indexing fails — leaving the
+        agent service offline is worse than a failed job.
+        """
+        self._set_phase(job_id, "stopping_gateway")
+        self.openclaw.gateway_stop()
+        try:
+            with self.index_lock():
+                self._set_phase(job_id, "force_indexing")
+                return self.openclaw.index(agent_id, force=True)
+        finally:
+            self._set_phase(job_id, "starting_gateway")
+            self.openclaw.gateway_start()
 
     @staticmethod
     def _refresh_mtimes(knowledge_base_path: Path) -> None:

@@ -82,6 +82,18 @@ elif args[:2] == ["memory", "index"]:
         raise SystemExit(2)
     print("indexed " + " ".join(args))
     save()
+elif args[:2] == ["gateway", "stop"]:
+    if os.environ.get("FAKE_GATEWAY_STOP_FAIL") == "1":
+        print("fake gateway stop failure", file=sys.stderr)
+        save()
+        raise SystemExit(3)
+    state["gateway_running"] = False
+    print(json.dumps({"ok": True, "result": "stopped"}))
+    save()
+elif args[:2] == ["gateway", "start"]:
+    state["gateway_running"] = True
+    print(json.dumps({"ok": True, "result": "started"}))
+    save()
 else:
     print("unsupported fake command: " + " ".join(args), file=sys.stderr)
     save()
