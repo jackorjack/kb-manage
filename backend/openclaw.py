@@ -17,6 +17,19 @@ class OpenClawError(RuntimeError):
     pass
 
 
+def gateway_stop_reported_not_loaded(result: CommandResult) -> bool:
+    """True when `gateway stop` says no service was loaded.
+
+    Stopping an unloaded service is a success with result "not-loaded"; that
+    Gateway was never running, so the caller must not start one afterwards.
+    """
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and payload.get("result") == "not-loaded"
+
+
 @dataclass
 class CommandResult:
     args: List[str]

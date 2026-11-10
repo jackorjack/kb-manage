@@ -87,6 +87,10 @@ elif args[:2] == ["gateway", "stop"]:
         print("fake gateway stop failure", file=sys.stderr)
         save()
         raise SystemExit(3)
+    if os.environ.get("FAKE_GATEWAY_NOT_LOADED") == "1":
+        print(json.dumps({"ok": True, "result": "not-loaded", "message": "Gateway service is not loaded."}))
+        save()
+        raise SystemExit(0)
     state["gateway_running"] = False
     print(json.dumps({"ok": True, "result": "stopped"}))
     save()

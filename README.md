@@ -78,14 +78,35 @@ command -v openclaw
 ./scripts/deploy.sh --restart
 ```
 
-## Forced index
+## Memory index and the Gateway
 
-Current OpenClaw releases refuse `memory index --force` while the Gateway is
-running, so a forced index from the manager (`POST
-/api/knowledge-bases/{id}/index` with `force: true`) runs
-`openclaw gateway stop --force`, then `memory index --force`, then
-`openclaw gateway start`. The Gateway is started again even when indexing
-fails; if the stop itself fails the Gateway is left running and the job fails.
+Since OpenClaw 11.x, **every** `openclaw memory` subcommand (including a plain
+`memory index`) requires exclusive offline state ownership and refuses to run
+while a Gateway holds the state directory; there is no online reindex RPC
+(`memory.index` does not exist). The manager therefore stops the Gateway around
+any index run (`POST /api/knowledge-bases/{id}/index`, `force` true or false):
+
+```
+openclaw gateway stop --force --json
+openclaw memory index [--agent <id>] [--force] --verbose
+openclaw gateway start --json
+```
+
+Guidelines for that sequence:
+
+- If the stop itself fails, nothing is indexed and the Gateway is left alone.
+- The Gateway is started again even when indexing fails: leaving the agent
+  service offline is worse than a failed job.
+- A non-zero exit from `gateway start` is downgraded to a warning when
+  `openclaw gateway status` still reports a serving process — OpenClaw exits 1
+  for plugin load errors (e.g. a third-party plugin built against an older
+  plugin SDK) while the Gateway itself is healthy.
+- If `gateway stop` reports the service was never loaded, the manager does not
+  start one.
+
+`gateway stop`/`start` also refuse to run when `OPENCLAW_STATE_DIR` or
+`OPENCLAW_CONFIG_PATH` point outside the account's canonical locations
+("service management skipped: non-default state dir or config path").
 
 ## Reverse proxy under a sub-path
 
@@ -151,6 +172,6 @@ A knowledge base can be created with scope **public** instead of being linked to
   (`409`) so a batch never half-moves; both knowledge bases are reindexed after
   the move.
 - The workspace "同步索引" button runs an incremental `memory index` for that
-  knowledge base's own Agent (or every agent, for a public knowledge base)
-  without stopping the Gateway. "强制同步" is the `--force` variant that needs
-  the Gateway restart described above.
+  knowledge base's own Agent (or every agent, for a public knowledge base).
+  It needs the same brief Gateway stop as "强制同步"; the only difference is
+  that it does not pass `--force`, so unchanged files are skipped.

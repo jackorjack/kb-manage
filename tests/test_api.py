@@ -776,6 +776,38 @@ def test_incremental_index_only_touches_its_own_agent(tmp_path, monkeypatch):
         assert job["status"] == "succeeded", job
 
     saved = json.loads(state_path.read_text())
-    index_commands = [command for command in saved["commands"] if command[:2] == ["memory", "index"]]
-    assert index_commands == [["memory", "index", "--agent", "assistant", "--verbose"]]
-    assert not any(command[:2] == ["gateway", "stop"] for command in saved["commands"])
+    relevant = [
+        command
+        for command in saved["commands"]
+        if command[:2] in (["memory", "index"], ["gateway", "stop"], ["gateway", "start"])
+    ]
+    # OpenClaw 11.x refuses memory index while the Gateway owns the state dir,
+    # so an incremental run stops and restarts it too.
+    assert relevant == [
+        ["gateway", "stop", "--force", "--json"],
+        ["memory", "index", "--agent", "assistant", "--verbose"],
+        ["gateway", "start", "--json"],
+    ]
+
+
+def test_index_does_not_start_a_gateway_that_was_never_loaded(tmp_path, monkeypatch):
+    client, state_path = make_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("FAKE_GATEWAY_NOT_LOADED", "1")
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        created = client.post(
+            "/api/knowledge-bases",
+            json={"name": "无服务库", "agentId": "assistant", "path": str(tmp_path / "docs")},
+            headers=headers,
+        )
+        kb = created.json()
+
+        indexed = client.post(
+            f"/api/knowledge-bases/{kb['id']}/index", json={"force": False}, headers=headers
+        )
+        job = wait_for_job(client, indexed.json()["id"])
+        assert job["status"] == "succeeded", job
+
+    saved = json.loads(state_path.read_text())
+    assert not any(command[:2] == ["gateway", "start"] for command in saved["commands"])

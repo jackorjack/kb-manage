@@ -29,7 +29,12 @@ from .files import (
     remove_staging_dir,
     sha256_file,
 )
-from .openclaw import CommandResult, OpenClawError, OpenClawService
+from .openclaw import (
+    CommandResult,
+    OpenClawError,
+    OpenClawService,
+    gateway_stop_reported_not_loaded,
+)
 from .utils import json_dumps, json_loads, utc_now
 
 
@@ -327,34 +332,38 @@ class JobWorker:
         return knowledge_base["agent_id"]
 
     def _run_index(self, job_id: str, knowledge_base, agent_id: Optional[str], force: bool):
+        # OpenClaw 11.x requires exclusive offline state ownership for every
+        # `memory index` (incremental included) and refuses while a Gateway
+        # holds the state dir. There is no online reindex RPC, so both modes
+        # have to stop the Gateway for the duration of the index run.
         if force:
             # OpenClaw's retrieval score decays with file age. Refreshing the
             # mtime before a force reindex makes stable, long-lived content
             # rank as fresh instead of sinking over time.
             self._refresh_mtimes(Path(knowledge_base["path"]))
-            # Current OpenClaw refuses --force while the Gateway is running.
-            return self._run_force_index_between_gateway_restarts(job_id, agent_id)
-        with self.index_lock():
-            return self.openclaw.index(agent_id, force=False)
+        return self._run_index_between_gateway_restarts(job_id, agent_id, force)
 
-    def _run_force_index_between_gateway_restarts(
-        self, job_id: str, agent_id: Optional[str]
+    def _run_index_between_gateway_restarts(
+        self, job_id: str, agent_id: Optional[str], force: bool
     ) -> CommandResult:
-        """Stop the Gateway, force-index, then always start it again.
+        """Stop the Gateway, index, then always start it again.
 
         If the stop itself fails the Gateway is left alone and the job fails.
         Once it is down the restart runs even when indexing fails — leaving the
         agent service offline is worse than a failed job.
         """
         self._set_phase(job_id, "stopping_gateway")
-        self.openclaw.gateway_stop()
+        stop_result = self.openclaw.gateway_stop()
+        # A Gateway that was not loaded was never ours to restart; starting it
+        # would spawn a service the operator may not have installed.
+        stopped = not gateway_stop_reported_not_loaded(stop_result)
 
         result: Optional[CommandResult] = None
         index_error: Optional[BaseException] = None
         try:
             with self.index_lock():
-                self._set_phase(job_id, "force_indexing")
-                result = self.openclaw.index(agent_id, force=True)
+                self._set_phase(job_id, "force_indexing" if force else "indexing")
+                result = self.openclaw.index(agent_id, force=force)
         except BaseException as exc:
             # Keep the index result even when the restart goes on to fail;
             # it carries the command output the job panel shows.
@@ -363,10 +372,11 @@ class JobWorker:
         self._set_phase(job_id, "starting_gateway")
         start_warning = ""
         start_error: Optional[OpenClawError] = None
-        try:
-            start_warning = self._start_gateway_tolerating_plugin_errors()
-        except OpenClawError as exc:
-            start_error = exc
+        if stopped:
+            try:
+                start_warning = self._start_gateway_tolerating_plugin_errors()
+            except OpenClawError as exc:
+                start_error = exc
 
         if index_error is not None:
             if start_error is not None:

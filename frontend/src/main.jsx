@@ -781,7 +781,7 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, onRename, busy,
                 {query && <button className="doc-search-clear" title="清除筛选" onClick={() => setQuery("")}><X size={14} /></button>}
               </div>
               <button className="icon-button" title="刷新文件列表" onClick={loadDocuments}><RefreshCw size={16} /></button>
-              <button className="ghost-button" disabled={busy || syncBusy} title={kb.scope === "public" ? "增量同步：所有 Agent 重新索引该目录" : `增量同步：只让 ${kb.agentId} 重新索引该目录`} onClick={syncAgentIndex}>{syncBusy ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}同步索引</button>
+              <button className="ghost-button" disabled={busy || syncBusy} title={kb.scope === "public" ? "增量同步：所有 Agent 重新索引该目录（需短暂停服）" : `增量同步：只让 ${kb.agentId} 重新索引该目录（需短暂停服）`} onClick={syncAgentIndex}>{syncBusy ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}同步索引</button>
               <button className="force-button" disabled={busy} title={kb.scope === "public" ? "对所有 Agent 强制重建索引" : `对 ${kb.agentId} 强制重建索引`} onClick={() => { setForceError(""); setForceOpen(true); }}><Zap size={15} />强制同步</button>
             </div>
           </div>
@@ -849,9 +849,9 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, onRename, busy,
             <div><span>操作对象</span><strong>{kb.name}</strong></div>
           </div>
           <p className="confirm-description">
-            强制同步会先停掉智能体服务（OpenClaw Gateway），待同步完成后自动重启。整个过程通常需要几分钟，期间 Agent 无法响应消息。
+            强制同步会先停掉智能体服务（OpenClaw Gateway），重建索引完成后自动重启。整个过程通常需要几分钟，期间 Agent 无法响应消息。
           </p>
-          <div className="confirm-note"><AlertTriangle size={16} /><span>同步失败时也会重启服务，避免 Agent 长时间离线。</span></div>
+          <div className="confirm-note"><AlertTriangle size={16} /><span>「同步索引」同样需要停服，只是不重建向量；同步失败时都会重启服务，避免 Agent 长时间离线。</span></div>
           <ErrorNotice message={forceError} />
           <div className="modal-actions">
             <button type="button" className="ghost-button" disabled={forceBusy} onClick={() => setForceOpen(false)}>取消</button>
