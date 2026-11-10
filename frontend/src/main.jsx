@@ -27,7 +27,6 @@ import {
   Trash2,
   Upload,
   X,
-  Zap,
 } from "lucide-react";
 import "./styles.css";
 
@@ -614,7 +613,7 @@ function JobPanel({ job, onClose }) {
   return <aside className="job-panel"><div className="job-panel-header"><div><p className="eyebrow">RUN DETAIL</p><h3>同步任务</h3></div><button className="icon-button" title="关闭任务详情" onClick={onClose}><X size={17} /></button></div><div className="job-summary"><StatusPill status={job.status} phase={job.phase} /><span>{job.mode === "force" ? "强制重建" : "自动同步"}</span></div><div className="job-timeline"><div className={job.phase === "converting" ? "current" : ""}><span>01</span><strong>转换文档</strong></div><div className={job.phase === "publishing" ? "current" : ""}><span>02</span><strong>写入目录</strong></div><div className={job.phase === "indexing" ? "current" : ""}><span>03</span><strong>执行索引</strong></div></div>{job.files?.length > 0 && <div className="job-files">{job.files.map((file) => <div key={file.source_name}><span>{file.source_name}</span><small className={file.status === "failed" ? "danger-text" : ""}>{file.status === "converted" ? "converted" : file.status}</small></div>)}</div>}{job.error && <div className="job-error"><AlertTriangle size={15} />{job.error}</div>}<div className="log-block"><div className="log-label">COMMAND OUTPUT</div><pre>{[job.stdout, job.stderr].filter(Boolean).join("\n") || "等待任务输出..."}</pre></div><div className="job-time">创建于 {formatTime(job.createdAt)}{job.finishedAt && ` · 完成于 ${formatTime(job.finishedAt)}`}</div></aside>;
 }
 
-function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, onRename, busy, onShowJob }) {
+function Workspace({ kb, onRefresh, onUpload, onDelete, onRename, busy, onShowJob }) {
   const [documents, setDocuments] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -709,7 +708,6 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, onRename, busy,
                 {query && <button className="doc-search-clear" title="清除筛选" onClick={() => setQuery("")}><X size={14} /></button>}
               </div>
               <button className="icon-button" title="刷新文件列表" onClick={loadDocuments}><RefreshCw size={16} /></button>
-              <button className="force-button" disabled={busy} title={kb.scope === "public" ? "对所有 Agent 强制重建索引" : `对 ${kb.agentId} 强制重建索引`} onClick={() => onIndex(true)}><Zap size={15} />强制同步</button>
             </div>
           </div>
           <div className="table-wrap">
@@ -840,7 +838,7 @@ function App() {
   function created(kb) {
     setShowCreate(false);
     loadKbs(kb.id);
-    if (kb.configChanged) setNotice("检索路径已变更：请在合适的时间重启 OpenClaw Gateway，然后在该知识库点「强制同步」重建索引。");
+    if (kb.configChanged) setNotice("检索路径已变更：请在合适的时间重启 OpenClaw Gateway，然后在服务器执行 openclaw memory index 完成索引。");
   }
 
   function newJob(result) {
@@ -877,8 +875,8 @@ function App() {
       setError("");
       if (result?.configChanged) {
         setNotice(result.scope === "public"
-          ? "公共库已从全局检索路径移除：请重启 OpenClaw Gateway，然后在服务器执行 openclaw memory index --force，清理所有 Agent 索引里的旧内容。"
-          : `已从 Agent 检索路径移除：请重启 OpenClaw Gateway，然后执行 openclaw memory index --force --agent ${deleteKbTarget.agentId}。`);
+          ? "公共库已从全局检索路径移除：请重启 OpenClaw Gateway，然后在服务器执行 openclaw memory index，清理所有 Agent 索引里的旧内容。"
+          : `已从 Agent 检索路径移除：请重启 OpenClaw Gateway，然后执行 openclaw memory index --agent ${deleteKbTarget.agentId}。`);
       }
     } catch (err) {
       setDeleteKbError(err.message);
@@ -907,7 +905,6 @@ function App() {
             onUpload={() => setShowUpload(true)}
             onRename={() => setShowRename(true)}
             onDelete={(kb) => { setDeleteKbTarget(kb); setDeleteKbError(""); }}
-            onIndex={(force) => api(`/api/knowledge-bases/${current.id}/index`, { method: "POST", body: JSON.stringify({ force }) }).then(newJob).catch((err) => setError(err.message))}
             onShowJob={setJob}
           />
         ) : <EmptyState onCreate={() => setShowCreate(true)} />}

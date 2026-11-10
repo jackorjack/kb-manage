@@ -50,7 +50,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .eyebrow { margin: 0 0 9px; color: var(--muted); font: 600 10px/1.2 "DM Mono", "SFMono-Regular", monospace; letter-spacing: .08em; }
 .brand-mark { display: flex; align-items: center; gap: 9px; color: var(--deep); font: 700 12px/1 "DM Mono", monospace; letter-spacing: .04em; }
 .brand-mark svg { color: var(--rust); }
-.primary-button, .ghost-button, .danger-button, .force-button, .new-kb-button, .side-action, .text-button { border: 0; display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: transform .18s ease, background .18s ease, color .18s ease; }
+.primary-button, .ghost-button, .danger-button, .new-kb-button, .side-action, .text-button { border: 0; display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: transform .18s ease, background .18s ease, color .18s ease; }
 .primary-button { min-height: 40px; padding: 0 15px; color: #fffaf4; background: var(--deep); font-size: 13px; font-weight: 700; }
 .primary-button:hover:not(:disabled) { transform: translateY(-1px); background: #2b3c38; }
 .primary-button.wide { width: 100%; min-height: 46px; }
@@ -58,8 +58,6 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .ghost-button:hover:not(:disabled) { background: #e5e3dc; }
 .danger-button { min-height: 40px; padding: 0 15px; color: #fffaf4; background: var(--rust); font-size: 13px; font-weight: 700; }
 .danger-button:hover:not(:disabled) { transform: translateY(-1px); background: #963f29; }
-.force-button { min-height: 34px; padding: 0 11px; color: var(--rust); background: var(--rust-soft); font-size: 12px; font-weight: 700; }
-.force-button:hover:not(:disabled) { background: #e9cabe; }
 .icon-button { display: inline-grid; place-items: center; width: 34px; height: 34px; padding: 0; color: var(--ink); background: transparent; border: 1px solid transparent; }
 .icon-button { transition: border-color .16s ease, background .16s ease, color .16s ease; }
 .icon-button:hover:not(:disabled) { border-color: var(--line); background: #e9e7df; }
