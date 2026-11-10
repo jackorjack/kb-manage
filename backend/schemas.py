@@ -39,6 +39,11 @@ class IndexRequest(BaseModel):
     force: bool = False
 
 
+class DocumentMoveRequest(BaseModel):
+    targetKnowledgeBaseId: str = Field(min_length=1, max_length=64)
+    documentIds: List[str] = Field(min_length=1, max_length=200)
+
+
 class SystemConfigUpdate(BaseModel):
     refresherEnabled: Optional[bool] = None
     refresherAgeDays: Optional[int] = Field(default=None, ge=1, le=3650)

@@ -18,6 +18,7 @@ import {
   KeyRound,
   LoaderCircle,
   LogOut,
+  MoveRight,
   Pencil,
   Plus,
   RefreshCw,
@@ -85,6 +86,7 @@ function statusMeta(status, phase) {
       conversion_failed: "转换失败",
       publishing: "写入中",
       deleting: "删除中",
+      moving: "迁移中",
       indexing: "索引中",
       stopping_gateway: "停止服务中",
       force_indexing: "强制索引中",
@@ -614,10 +616,10 @@ function PasswordModal({ onClose }) {
 function JobPanel({ job, onClose }) {
   if (!job) return null;
   const meta = statusMeta(job.status, job.phase);
-  return <aside className="job-panel"><div className="job-panel-header"><div><p className="eyebrow">RUN DETAIL</p><h3>同步任务</h3></div><button className="icon-button" title="关闭任务详情" onClick={onClose}><X size={17} /></button></div><div className="job-summary"><StatusPill status={job.status} phase={job.phase} /><span>{job.mode === "force" ? "强制重建" : "自动同步"}</span></div><div className="job-timeline"><div className={job.phase === "converting" ? "current" : ""}><span>01</span><strong>转换文档</strong></div><div className={job.phase === "publishing" ? "current" : ""}><span>02</span><strong>写入目录</strong></div><div className={job.phase === "indexing" ? "current" : ""}><span>03</span><strong>执行索引</strong></div></div>{job.files?.length > 0 && <div className="job-files">{job.files.map((file) => <div key={file.source_name}><span>{file.source_name}</span><small className={file.status === "failed" ? "danger-text" : ""}>{file.status === "converted" ? "converted" : file.status}</small></div>)}</div>}{job.error && <div className="job-error"><AlertTriangle size={15} />{job.error}</div>}<div className="log-block"><div className="log-label">COMMAND OUTPUT</div><pre>{[job.stdout, job.stderr].filter(Boolean).join("\n") || "等待任务输出..."}</pre></div><div className="job-time">创建于 {formatTime(job.createdAt)}{job.finishedAt && ` · 完成于 ${formatTime(job.finishedAt)}`}</div></aside>;
+  return <aside className="job-panel"><div className="job-panel-header"><div><p className="eyebrow">RUN DETAIL</p><h3>同步任务</h3></div><button className="icon-button" title="关闭任务详情" onClick={onClose}><X size={17} /></button></div><div className="job-summary"><StatusPill status={job.status} phase={job.phase} /><span>{job.mode === "force" ? "强制重建" : job.kind === "move" ? "文档迁移" : "自动同步"}</span></div><div className="job-timeline"><div className={job.phase === "converting" ? "current" : ""}><span>01</span><strong>转换文档</strong></div><div className={job.phase === "publishing" ? "current" : ""}><span>02</span><strong>写入目录</strong></div><div className={["indexing", "moving", "stopping_gateway", "force_indexing", "starting_gateway"].includes(job.phase) ? "current" : ""}><span>03</span><strong>{job.kind === "move" ? "迁移并索引" : "执行索引"}</strong></div></div>{job.files?.length > 0 && <div className="job-files">{job.files.map((file) => <div key={file.source_name}><span>{file.source_name}</span><small className={file.status === "failed" ? "danger-text" : ""}>{file.status === "converted" ? "converted" : file.status}</small></div>)}</div>}{job.error && <div className="job-error"><AlertTriangle size={15} />{job.error}</div>}<div className="log-block"><div className="log-label">COMMAND OUTPUT</div><pre>{[job.stdout, job.stderr].filter(Boolean).join("\n") || "等待任务输出..."}</pre></div><div className="job-time">创建于 {formatTime(job.createdAt)}{job.finishedAt && ` · 完成于 ${formatTime(job.finishedAt)}`}</div></aside>;
 }
 
-function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, onRename, busy, onShowJob }) {
+function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, onRename, busy, onShowJob, items }) {
   const [documents, setDocuments] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -627,6 +629,12 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, onRename, busy,
   const [forceOpen, setForceOpen] = useState(false);
   const [forceBusy, setForceBusy] = useState(false);
   const [forceError, setForceError] = useState("");
+  const [selectedDocIds, setSelectedDocIds] = useState([]);
+  const [moveTargetId, setMoveTargetId] = useState("");
+  const [moveBusy, setMoveBusy] = useState(false);
+  const [moveError, setMoveError] = useState("");
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncError, setSyncError] = useState("");
   const [query, setQuery] = useState("");
   const completedJobId = ["succeeded", "failed"].includes(kb.latestJob?.status) ? kb.latestJob.id : "";
   const filtered = useMemo(() => {
@@ -654,8 +662,18 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, onRename, busy,
     setDeleteError("");
     setForceOpen(false);
     setForceError("");
+    setSelectedDocIds([]);
+    setMoveTargetId("");
+    setMoveError("");
     setQuery("");
   }, [kb.id]);
+
+  // Selection is keyed by document id; drop ids that no longer exist and
+  // collapse everything if a job rewrites the list underneath us.
+  useEffect(() => {
+    const known = new Set(documents.map((document) => document.id));
+    setSelectedDocIds((ids) => ids.filter((id) => known.has(id)));
+  }, [documents]);
 
   async function refreshAll() {
     await onRefresh();
@@ -689,6 +707,39 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, onRename, busy,
       setForceBusy(false);
     }
   }
+
+  async function syncAgentIndex() {
+    setSyncBusy(true);
+    setSyncError("");
+    try {
+      onShowJob(await onIndex(false));
+    } catch (err) {
+      setSyncError(err.message);
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+
+  async function moveSelected() {
+    if (!moveTargetId || selectedDocIds.length === 0) return;
+    setMoveBusy(true);
+    setMoveError("");
+    try {
+      const result = await api(`/api/knowledge-bases/${kb.id}/documents/move`, {
+        method: "POST",
+        body: JSON.stringify({ targetKnowledgeBaseId: moveTargetId, documentIds: selectedDocIds }),
+      });
+      setSelectedDocIds([]);
+      setMoveTargetId("");
+      onShowJob(result);
+    } catch (err) {
+      setMoveError(err.message);
+    } finally {
+      setMoveBusy(false);
+    }
+  }
+
+  const moveCandidates = items.filter((item) => item.id !== kb.id);
 
   return (
     <>
@@ -730,21 +781,36 @@ function Workspace({ kb, onRefresh, onUpload, onIndex, onDelete, onRename, busy,
                 {query && <button className="doc-search-clear" title="清除筛选" onClick={() => setQuery("")}><X size={14} /></button>}
               </div>
               <button className="icon-button" title="刷新文件列表" onClick={loadDocuments}><RefreshCw size={16} /></button>
+              <button className="ghost-button" disabled={busy || syncBusy} title={kb.scope === "public" ? "增量同步：所有 Agent 重新索引该目录" : `增量同步：只让 ${kb.agentId} 重新索引该目录`} onClick={syncAgentIndex}>{syncBusy ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}同步索引</button>
               <button className="force-button" disabled={busy} title={kb.scope === "public" ? "对所有 Agent 强制重建索引" : `对 ${kb.agentId} 强制重建索引`} onClick={() => { setForceError(""); setForceOpen(true); }}><Zap size={15} />强制同步</button>
             </div>
           </div>
+          <ErrorNotice message={syncError} onClose={() => setSyncError("")} />
+          {selectedDocIds.length > 0 && (
+            <div className="move-bar">
+              <span className="move-bar-count">已选 {selectedDocIds.length} 个文档</span>
+              <select value={moveTargetId} disabled={moveBusy} onChange={(event) => setMoveTargetId(event.target.value)} aria-label="选择目标知识库">
+                <option value="">迁移到…</option>
+                {moveCandidates.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+              <button className="ghost-button" disabled={moveBusy || !moveTargetId || moveCandidates.length === 0} onClick={moveSelected}><MoveRight size={15} />{moveBusy ? "迁移中" : "迁移"}</button>
+              <button className="text-button" disabled={moveBusy} onClick={() => { setSelectedDocIds([]); setMoveTargetId(""); setMoveError(""); }}>取消选择</button>
+            </div>
+          )}
+          <ErrorNotice message={moveError} onClose={() => setMoveError("")} />
           <div className="table-wrap">
             <table>
-              <thead><tr><th>文件名称</th><th>类型</th><th>大小</th><th>上传时间</th><th>更新时间</th><th className="action-col">操作</th></tr></thead>
+              <thead><tr><th className="select-col"><input type="checkbox" aria-label="全选文档" checked={filtered.length > 0 && filtered.every((document) => selectedDocIds.includes(document.id))} onChange={(event) => setSelectedDocIds(event.target.checked ? filtered.map((document) => document.id) : [])} /></th><th>文件名称</th><th>类型</th><th>大小</th><th>上传时间</th><th>更新时间</th><th className="action-col">操作</th></tr></thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan="6" className="table-empty"><LoaderCircle className="spin" size={18} />正在读取目录</td></tr>
+                  <tr><td colSpan="7" className="table-empty"><LoaderCircle className="spin" size={18} />正在读取目录</td></tr>
                 ) : documents.length === 0 ? (
-                  <tr><td colSpan="6" className="table-empty"><FileText size={22} /><span>目录中还没有 Markdown 文档</span><button className="text-button" disabled={busy} onClick={onUpload}>导入第一批文档</button></td></tr>
+                  <tr><td colSpan="7" className="table-empty"><FileText size={22} /><span>目录中还没有 Markdown 文档</span><button className="text-button" disabled={busy} onClick={onUpload}>导入第一批文档</button></td></tr>
                 ) : filtered.length === 0 ? (
-                  <tr><td colSpan="6" className="table-empty"><Search size={22} /><span>没有匹配「{query}」的文档</span><button className="text-button" onClick={() => setQuery("")}>清除筛选</button></td></tr>
+                  <tr><td colSpan="7" className="table-empty"><Search size={22} /><span>没有匹配「{query}」的文档</span><button className="text-button" onClick={() => setQuery("")}>清除筛选</button></td></tr>
                 ) : filtered.map((document) => (
                   <tr key={document.id}>
+                    <td className="select-col"><input type="checkbox" aria-label={`选择 ${document.name}`} checked={selectedDocIds.includes(document.id)} onChange={(event) => setSelectedDocIds((ids) => event.target.checked ? [...ids, document.id] : ids.filter((id) => id !== document.id))} /></td>
                     <td><div className="file-name"><div className="file-icon"><FileText size={16} /></div><span>{document.name}</span></div></td>
                     <td><span className="file-type">{{".docx":"DOCX → MD",".xlsx":"EXCEL → MD",".csv":"CSV → MD"}[document.sourceExt] || "MARKDOWN"}</span></td>
                     <td>{formatBytes(document.sizeBytes)}</td>
@@ -942,6 +1008,7 @@ function App() {
           <SystemPanel onClose={() => setShowSystem(false)} />
         ) : current ? (
           <Workspace
+            items={items}
             kb={current}
             busy={busy}
             onRefresh={() => loadKbs(current.id)}

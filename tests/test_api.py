@@ -622,3 +622,160 @@ def test_force_index_leaves_gateway_alone_when_stop_fails(tmp_path, monkeypatch)
     saved = json.loads(state_path.read_text())
     assert not any(command[:2] == ["gateway", "start"] for command in saved["commands"])
     assert not any(command[:2] == ["memory", "index"] for command in saved["commands"])
+
+
+def test_force_index_treats_start_plugin_error_as_warning_when_gateway_serves(tmp_path, monkeypatch):
+    client, state_path = make_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("FAKE_GATEWAY_START_FAIL", "running")
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        created = client.post(
+            "/api/knowledge-bases",
+            json={"name": "插件告警库", "agentId": "assistant", "path": str(tmp_path / "docs")},
+            headers=headers,
+        )
+        kb = created.json()
+
+        forced = client.post(f"/api/knowledge-bases/{kb['id']}/index", json={"force": True}, headers=headers)
+        job = wait_for_job(client, forced.json()["id"])
+
+    # The Gateway came up despite the plugin load error, so the job succeeds.
+    assert job["status"] == "succeeded", job
+    assert "Gateway restarted with warnings" in job["stderr"]
+    assert "activated plugins reported load errors" in job["stderr"]
+
+
+def test_force_index_fails_when_start_leaves_gateway_down(tmp_path, monkeypatch):
+    client, state_path = make_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("FAKE_GATEWAY_START_FAIL", "1")
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        created = client.post(
+            "/api/knowledge-bases",
+            json={"name": "启动失败库", "agentId": "assistant", "path": str(tmp_path / "docs")},
+            headers=headers,
+        )
+        kb = created.json()
+
+        forced = client.post(f"/api/knowledge-bases/{kb['id']}/index", json={"force": True}, headers=headers)
+        job = wait_for_job(client, forced.json()["id"])
+
+    assert job["status"] == "failed", job
+    saved = json.loads(state_path.read_text())
+    assert saved.get("gateway_running") is not True
+
+
+def _two_agent_state(tmp_path):
+    return {
+        "defaults": {},
+        "agents": [
+            {"id": "assistant", "name": "Assistant", "workspace": str(tmp_path / "agent-workspace")},
+            {"id": "second", "name": "Second", "workspace": str(tmp_path / "second-workspace")},
+        ],
+        "commands": [],
+    }
+
+
+def _create_kb(client, headers, name, path, agent_id="assistant"):
+    created = client.post(
+        "/api/knowledge-bases",
+        json={"name": name, "agentId": agent_id, "path": str(path)},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    return created.json()
+
+
+def test_documents_can_be_moved_to_another_knowledge_base(tmp_path, monkeypatch):
+    client, state_path = make_client(tmp_path, monkeypatch, _two_agent_state(tmp_path))
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        source = _create_kb(client, headers, "源库", tmp_path / "source-docs")
+        target = _create_kb(client, headers, "目标库", tmp_path / "target-docs", agent_id="second")
+
+        upload = client.post(
+            f"/api/knowledge-bases/{source['id']}/documents",
+            files=[("files", ("guide.md", b"# Guide", "text/markdown"))],
+            headers=headers,
+        )
+        assert wait_for_job(client, upload.json()["id"])["status"] == "succeeded"
+        document = client.get(f"/api/knowledge-bases/{source['id']}/documents").json()["items"][0]
+
+        moved = client.post(
+            f"/api/knowledge-bases/{source['id']}/documents/move",
+            json={"targetKnowledgeBaseId": target["id"], "documentIds": [document["id"]]},
+            headers=headers,
+        )
+        assert moved.status_code == 200, moved.text
+        assert wait_for_job(client, moved.json()["id"])["status"] == "succeeded"
+
+        assert client.get(f"/api/knowledge-bases/{source['id']}/documents").json()["items"] == []
+        target_items = client.get(f"/api/knowledge-bases/{target['id']}/documents").json()["items"]
+        assert [item["name"] for item in target_items] == ["guide.md"]
+
+    assert not (tmp_path / "source-docs" / "guide.md").exists()
+    assert (tmp_path / "target-docs" / "guide.md").read_text() == "# Guide\n"
+
+
+def test_move_rejects_name_collision_and_same_target(tmp_path, monkeypatch):
+    client, _ = make_client(tmp_path, monkeypatch, _two_agent_state(tmp_path))
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        source = _create_kb(client, headers, "源库", tmp_path / "source-docs")
+        target = _create_kb(client, headers, "目标库", tmp_path / "target-docs", agent_id="second")
+        for kb, path in ((source, "source-docs"), (target, "target-docs")):
+            upload = client.post(
+                f"/api/knowledge-bases/{kb['id']}/documents",
+                files=[("files", ("guide.md", b"# Guide", "text/markdown"))],
+                headers=headers,
+            )
+            assert wait_for_job(client, upload.json()["id"])["status"] == "succeeded"
+
+        document = client.get(f"/api/knowledge-bases/{source['id']}/documents").json()["items"][0]
+
+        same = client.post(
+            f"/api/knowledge-bases/{source['id']}/documents/move",
+            json={"targetKnowledgeBaseId": source["id"], "documentIds": [document["id"]]},
+            headers=headers,
+        )
+        assert same.status_code == 400
+        assert (tmp_path / "source-docs" / "guide.md").exists()
+
+        collision = client.post(
+            f"/api/knowledge-bases/{source['id']}/documents/move",
+            json={"targetKnowledgeBaseId": target["id"], "documentIds": [document["id"]]},
+            headers=headers,
+        )
+        assert collision.status_code == 409
+        assert "guide.md" in collision.json()["detail"]
+        assert (tmp_path / "source-docs" / "guide.md").exists()
+        assert (tmp_path / "target-docs" / "guide.md").read_text() == "# Guide\n"
+
+
+def test_incremental_index_only_touches_its_own_agent(tmp_path, monkeypatch):
+    client, state_path = make_client(tmp_path, monkeypatch)
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        created = client.post(
+            "/api/knowledge-bases",
+            json={"name": "单 Agent 库", "agentId": "assistant", "path": str(tmp_path / "docs")},
+            headers=headers,
+        )
+        kb = created.json()
+
+        indexed = client.post(
+            f"/api/knowledge-bases/{kb['id']}/index", json={"force": False}, headers=headers
+        )
+        assert indexed.status_code == 200, indexed.text
+        job = wait_for_job(client, indexed.json()["id"])
+        assert job["status"] == "succeeded", job
+
+    saved = json.loads(state_path.read_text())
+    index_commands = [command for command in saved["commands"] if command[:2] == ["memory", "index"]]
+    assert index_commands == [["memory", "index", "--agent", "assistant", "--verbose"]]
+    assert not any(command[:2] == ["gateway", "stop"] for command in saved["commands"])

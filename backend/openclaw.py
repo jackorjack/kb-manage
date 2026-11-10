@@ -411,3 +411,25 @@ class OpenClawService:
 
     def gateway_start(self) -> CommandResult:
         return self.run(["gateway", "start", "--json"], timeout=180)
+
+    def gateway_is_running(self) -> bool:
+        """Report whether a Gateway process is actually serving.
+
+        `gateway start` exits non-zero when an activated plugin fails to load,
+        even though the Gateway itself comes up. Callers use this to tell that
+        case apart from a real start failure.
+        """
+        try:
+            status = json.loads(
+                self.run(["gateway", "status", "--json", "--no-probe"], timeout=60).stdout
+            )
+        except (OpenClawError, json.JSONDecodeError):
+            return False
+        if not isinstance(status, dict):
+            return False
+        port = status.get("port")
+        if isinstance(port, dict) and port.get("status") == "busy":
+            return True
+        service = status.get("service")
+        runtime = service.get("runtime") if isinstance(service, dict) else None
+        return isinstance(runtime, dict) and runtime.get("status") == "running"

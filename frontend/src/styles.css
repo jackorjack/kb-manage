@@ -213,6 +213,11 @@ tbody tr:hover { background: #f0eee7; }
 .file-type { color: var(--muted); font: 10px "DM Mono", monospace; }
 .action-col { width: 96px; text-align: right; }
 .action-col .row-actions { display: inline-flex; justify-content: flex-end; align-items: center; gap: 4px; }
+.select-col { width: 38px; padding-left: 12px; padding-right: 0; }
+.select-col input { width: 15px; height: 15px; accent-color: var(--teal); cursor: pointer; }
+.move-bar { display: flex; align-items: center; gap: 9px; padding: 10px 12px; margin-bottom: 10px; background: var(--paper); border-left: 3px solid var(--teal); box-shadow: var(--shadow); }
+.move-bar-count { color: var(--deep); font-size: 12px; font-weight: 700; }
+.move-bar select { min-height: 34px; padding: 0 8px; color: var(--ink); background: var(--paper); border: 1px solid var(--line); font-size: 12px; }
 .table-empty { height: 185px; color: var(--muted); text-align: center; }
 .table-empty > svg, .table-empty > span, .table-empty > button { display: block; margin: 0 auto 9px; }
 .table-empty > svg { color: #b7b9b1; }

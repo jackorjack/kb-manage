@@ -142,3 +142,15 @@ A knowledge base can be created with scope **public** instead of being linked to
 - Upload, delete and index jobs for a public knowledge base run `openclaw memory index` without `--agent`, which OpenClaw applies to every configured agent. Agent knowledge bases keep using `--agent <id>`.
 - Agent knowledge bases default to `<agent workspace>/wiki`; public directories are not offered as agent candidates.
 - Creating, remapping or deleting a knowledge base can change OpenClaw configuration (`configChanged` in the API response). Restart the Gateway, then run a forced index. The manager only restarts the Gateway for a forced index (see below); it never restarts it for configuration changes.
+
+## Document migration and per-Agent index
+
+- `POST /api/knowledge-bases/{id}/documents/move` with
+  `{"targetKnowledgeBaseId": "...", "documentIds": ["..."]}` moves Markdown
+  files into another knowledge base. Name collisions are rejected up front
+  (`409`) so a batch never half-moves; both knowledge bases are reindexed after
+  the move.
+- The workspace "同步索引" button runs an incremental `memory index` for that
+  knowledge base's own Agent (or every agent, for a public knowledge base)
+  without stopping the Gateway. "强制同步" is the `--force` variant that needs
+  the Gateway restart described above.

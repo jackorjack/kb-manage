@@ -91,8 +91,36 @@ elif args[:2] == ["gateway", "stop"]:
     print(json.dumps({"ok": True, "result": "stopped"}))
     save()
 elif args[:2] == ["gateway", "start"]:
+    if os.environ.get("FAKE_GATEWAY_START_FAIL") in {"1", "running"}:
+        print(
+            json.dumps(
+                {
+                    "action": "start",
+                    "ok": False,
+                    "error": "Gateway start failed: activated plugins reported load errors.",
+                    "warnings": ["Activated plugin load errors:"],
+                }
+            ),
+            file=sys.stderr,
+        )
+        if os.environ.get("FAKE_GATEWAY_START_FAIL") == "running":
+            # Mimic OpenClaw: the process came up anyway, exit code still 1.
+            state["gateway_running"] = True
+        save()
+        raise SystemExit(1)
     state["gateway_running"] = True
     print(json.dumps({"ok": True, "result": "started"}))
+    save()
+elif args[:2] == ["gateway", "status"]:
+    running = bool(state.get("gateway_running"))
+    print(
+        json.dumps(
+            {
+                "service": {"loaded": running},
+                "port": {"port": 18789, "status": "busy" if running else "free", "listeners": []},
+            }
+        )
+    )
     save()
 else:
     print("unsupported fake command: " + " ".join(args), file=sys.stderr)

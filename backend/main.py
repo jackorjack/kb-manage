@@ -33,6 +33,7 @@ from .jobs import JobError, JobWorker, create_job, get_active_job, get_job, upda
 from .openclaw import OpenClawError, OpenClawService
 from .refresher import MtimeRefresher
 from .schemas import (
+    DocumentMoveRequest,
     IndexRequest,
     KnowledgeBaseCreate,
     KnowledgeBaseReorder,
@@ -731,6 +732,45 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "delete",
                 "incremental",
                 {"names": [row["name"]]},
+                session["user_id"],
+            )
+        except JobError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return _serialize_job(get_job(db, job_id))
+
+    @app.post("/api/knowledge-bases/{knowledge_base_id}/documents/move")
+    def move_documents(request: Request, knowledge_base_id: str, body: DocumentMoveRequest):
+        session = _write_guard(request)
+        if body.targetKnowledgeBaseId == knowledge_base_id:
+            raise HTTPException(status_code=400, detail="target knowledge base must differ from the source")
+        source_kb = _ready_kb(request, knowledge_base_id)
+        target_kb = _ready_kb(request, body.targetKnowledgeBaseId)
+        db: Database = request.app.state.db
+        _assert_not_busy(db)
+        rows = _reconcile_documents(db, source_kb)
+        by_id = {row["id"]: row for row in rows}
+        missing = [document_id_value for document_id_value in body.documentIds if document_id_value not in by_id]
+        if missing:
+            raise HTTPException(status_code=404, detail="document not found")
+        names = [by_id[document_id_value]["name"] for document_id_value in body.documentIds]
+        # Reject name collisions up front so the job cannot move half a batch
+        # and then abort because the destination already has one of the names.
+        target_names = {
+            path.name for path in list_markdown_files(Path(target_kb["path"]))
+        }
+        collisions = [name for name in names if name in target_names]
+        if collisions:
+            raise HTTPException(
+                status_code=409,
+                detail=f"目标知识库已存在同名文件：{'、'.join(collisions)}",
+            )
+        try:
+            job_id = create_job(
+                db,
+                knowledge_base_id,
+                "move",
+                "incremental",
+                {"names": names, "target_knowledge_base_id": target_kb["id"]},
                 session["user_id"],
             )
         except JobError as exc:

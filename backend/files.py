@@ -158,6 +158,27 @@ def remove_document_file(knowledge_base_path: Path, name: str) -> bool:
     return True
 
 
+def move_document_file(source_path: Path, target_path: Path, name: str) -> None:
+    """Move one Markdown document between two knowledge-base directories.
+
+    Never overwrites: a name collision in the destination would silently
+    destroy the other document, so the caller gets a validation error instead.
+    Both paths go through assert_target_path, so neither side can escape its
+    knowledge-base directory.
+    """
+    source = assert_target_path(source_path, name)
+    target = assert_target_path(target_path, name)
+    if not source.is_file():
+        raise FileValidationError(f"source document is missing: {name}")
+    if target.exists():
+        raise FileValidationError(f"target knowledge base already has a document named {name}")
+    try:
+        source.replace(target)
+    except OSError:
+        # Cross-device moves cannot use Path.replace (EXDEV); copy then unlink.
+        shutil.move(str(source), str(target))
+
+
 def list_markdown_files(knowledge_base_path: Path) -> List[Path]:
     if not knowledge_base_path.exists() or not knowledge_base_path.is_dir():
         return []
