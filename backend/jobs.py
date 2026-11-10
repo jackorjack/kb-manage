@@ -12,7 +12,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import Settings
 from .converter import DocxMarkdownConverter
@@ -317,10 +317,14 @@ class JobWorker:
                     ),
                 )
         self._set_phase(row["id"], "indexing")
-        outputs = []
-        for kb in (source_kb, target_kb):
-            result = self._run_index(row["id"], kb, self._index_target(kb), False)
-            outputs.append(f"[{kb['name']}]\n{result.stdout}{result.stderr}".strip())
+        targets = [
+            (kb["name"], self._index_target(kb), False) for kb in (source_kb, target_kb)
+        ]
+        results = self._run_index_batch(row["id"], targets)
+        outputs = [
+            f"[{label}]\n{result.stdout}{result.stderr}".strip()
+            for (label, _, _), result in zip(targets, results)
+        ]
         self._append_output(row["id"], "\n\n".join(outputs), "", 0)
 
     @staticmethod
@@ -346,11 +350,22 @@ class JobWorker:
     def _run_index_between_gateway_restarts(
         self, job_id: str, agent_id: Optional[str], force: bool
     ) -> CommandResult:
-        """Stop the Gateway, index, then always start it again.
+        """Index one agent target with the Gateway stopped for the duration."""
+        return self._run_index_batch(job_id, [("", agent_id, force)])[0]
 
-        If the stop itself fails the Gateway is left alone and the job fails.
-        Once it is down the restart runs even when indexing fails — leaving the
-        agent service offline is worse than a failed job.
+    def _run_index_batch(
+        self, job_id: str, targets: List[Tuple[str, Optional[str], bool]]
+    ) -> List[CommandResult]:
+        """Stop the Gateway once, run every index target, then start it again.
+
+        Args:
+            targets: (label, agent_id, force) triples. Labels prefix each
+                command's output so a job that indexes two knowledge bases
+                stays readable.
+
+        A move reindexes both knowledge bases; stopping the Gateway twice for
+        the same batch would double the agent outage, so the stop/start wraps
+        the whole batch instead of each command.
         """
         self._set_phase(job_id, "stopping_gateway")
         stop_result = self.openclaw.gateway_stop()
@@ -358,16 +373,18 @@ class JobWorker:
         # would spawn a service the operator may not have installed.
         stopped = not gateway_stop_reported_not_loaded(stop_result)
 
-        result: Optional[CommandResult] = None
+        results: List[CommandResult] = []
+        failures: List[str] = []
         index_error: Optional[BaseException] = None
-        try:
-            with self.index_lock():
+        with self.index_lock():
+            for label, agent_id, force in targets:
                 self._set_phase(job_id, "force_indexing" if force else "indexing")
-                result = self.openclaw.index(agent_id, force=force)
-        except BaseException as exc:
-            # Keep the index result even when the restart goes on to fail;
-            # it carries the command output the job panel shows.
-            index_error = exc
+                try:
+                    results.append(self.openclaw.index(agent_id, force=force))
+                except OpenClawError as exc:
+                    # Index the remaining targets anyway: a failing source
+                    # reindex must not leave the destination stale.
+                    failures.append(f"{label}: {exc}" if label else str(exc))
 
         self._set_phase(job_id, "starting_gateway")
         start_warning = ""
@@ -378,6 +395,8 @@ class JobWorker:
             except OpenClawError as exc:
                 start_error = exc
 
+        if failures:
+            index_error = JobError("; ".join(failures))
         if index_error is not None:
             if start_error is not None:
                 raise JobError(
@@ -387,13 +406,16 @@ class JobWorker:
         if start_error is not None:
             raise start_error
         if start_warning:
-            result = CommandResult(
-                args=result.args,
-                returncode=result.returncode,
-                stdout=result.stdout,
-                stderr="\n".join(part for part in (start_warning, result.stderr) if part),
-            )
-        return result
+            results = [
+                CommandResult(
+                    args=result.args,
+                    returncode=result.returncode,
+                    stdout=result.stdout,
+                    stderr="\n".join(part for part in (start_warning, result.stderr) if part),
+                )
+                for result in results
+            ]
+        return results
 
     def _start_gateway_tolerating_plugin_errors(self) -> str:
         """Start the Gateway; return a warning when it is serving anyway.

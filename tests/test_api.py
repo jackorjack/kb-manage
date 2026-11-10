@@ -811,3 +811,77 @@ def test_index_does_not_start_a_gateway_that_was_never_loaded(tmp_path, monkeypa
 
     saved = json.loads(state_path.read_text())
     assert not any(command[:2] == ["gateway", "start"] for command in saved["commands"])
+
+
+def test_move_stops_gateway_once_and_indexes_both_agents(tmp_path, monkeypatch):
+    client, state_path = make_client(tmp_path, monkeypatch, _two_agent_state(tmp_path))
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        source = _create_kb(client, headers, "源库", tmp_path / "source-docs")
+        target = _create_kb(client, headers, "目标库", tmp_path / "target-docs", agent_id="second")
+        upload = client.post(
+            f"/api/knowledge-bases/{source['id']}/documents",
+            files=[("files", ("guide.md", b"# Guide", "text/markdown"))],
+            headers=headers,
+        )
+        assert wait_for_job(client, upload.json()["id"])["status"] == "succeeded"
+        document = client.get(f"/api/knowledge-bases/{source['id']}/documents").json()["items"][0]
+
+        # Only commands from here on matter; the upload above already indexed.
+        before = len(json.loads(state_path.read_text())["commands"])
+        moved = client.post(
+            f"/api/knowledge-bases/{source['id']}/documents/move",
+            json={"targetKnowledgeBaseId": target["id"], "documentIds": [document["id"]]},
+            headers=headers,
+        )
+        job = wait_for_job(client, moved.json()["id"])
+        assert job["status"] == "succeeded", job
+
+    commands = json.loads(state_path.read_text())["commands"][before:]
+    relevant = [
+        command
+        for command in commands
+        if command[:2] in (["memory", "index"], ["gateway", "stop"], ["gateway", "start"])
+    ]
+    assert relevant == [
+        ["gateway", "stop", "--force", "--json"],
+        ["memory", "index", "--agent", "assistant", "--verbose"],
+        ["memory", "index", "--agent", "second", "--verbose"],
+        ["gateway", "start", "--json"],
+    ]
+    assert "[源库]" in job["stdout"] and "[目标库]" in job["stdout"]
+
+
+def test_move_keeps_indexing_and_restarts_gateway_when_one_side_fails(tmp_path, monkeypatch):
+    client, state_path = make_client(tmp_path, monkeypatch, _two_agent_state(tmp_path))
+    with client:
+        csrf = login(client)
+        headers = {"X-CSRF-Token": csrf}
+        source = _create_kb(client, headers, "源库", tmp_path / "source-docs")
+        target = _create_kb(client, headers, "目标库", tmp_path / "target-docs", agent_id="second")
+        upload = client.post(
+            f"/api/knowledge-bases/{source['id']}/documents",
+            files=[("files", ("guide.md", b"# Guide", "text/markdown"))],
+            headers=headers,
+        )
+        assert wait_for_job(client, upload.json()["id"])["status"] == "succeeded"
+        document = client.get(f"/api/knowledge-bases/{source['id']}/documents").json()["items"][0]
+
+        before = len(json.loads(state_path.read_text())["commands"])
+        monkeypatch.setenv("FAKE_INDEX_FAIL", "1")
+        moved = client.post(
+            f"/api/knowledge-bases/{source['id']}/documents/move",
+            json={"targetKnowledgeBaseId": target["id"], "documentIds": [document["id"]]},
+            headers=headers,
+        )
+        job = wait_for_job(client, moved.json()["id"])
+        assert job["status"] == "failed", job
+        assert "源库" in job["error"]
+
+    commands = json.loads(state_path.read_text())["commands"][before:]
+    pairs = [command[:2] for command in commands if command[:2] in (["gateway", "stop"], ["gateway", "start"])]
+    assert pairs == [["gateway", "stop"], ["gateway", "start"]]
+    # The file still moved; only the reindex failed.
+    assert not (tmp_path / "source-docs" / "guide.md").exists()
+    assert (tmp_path / "target-docs" / "guide.md").exists()
